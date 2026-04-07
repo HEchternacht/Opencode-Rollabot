@@ -190,6 +190,8 @@ export const server: Plugin = async ({ $, directory, client }) => {
       const CODE_EXTS = [".py", ".js", ".ts", ".jsx", ".tsx", ".rs", ".go", ".rb"]
       const isTypeOnly = base.endsWith(".d.ts")
 
+      output.output ??= ""
+
       // Designer wrote something — check design.md
       if (agent === "designer") {
         if (isDesignFile) {
