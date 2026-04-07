@@ -3,6 +3,7 @@ import { readFileSync, existsSync } from "fs"
 import path from "path"
 
 const agentBySession = new Map<string, string>()
+const lastTextBySession = new Map<string, string>() // fallback buffer: last LLM text per session
 
 type ToastVariant = "info" | "success" | "warning" | "error"
 
@@ -27,6 +28,53 @@ export const server: Plugin = async ({ $, directory, client }) => {
         agentBySession.set(input.sessionID, input.agent)
         toast(`[Rollabot] agent: ${input.agent}`, "info", 2000)
       }
+    },
+
+    // Buffer last LLM text per session — used as fallback if designer skips writing design.md
+    "experimental.text.complete": async (input, output) => {
+      if (agentBySession.get(input.sessionID) === "designer") {
+        lastTextBySession.set(input.sessionID, output.text)
+      }
+    },
+
+    // When designer session goes idle: enforce design.md exists — write from output if missing
+    "event": async ({ event }) => {
+      if (event.type !== "session.idle") return
+      const sessionID = (event as any).properties?.sessionID
+      if (!sessionID || agentBySession.get(sessionID) !== "designer") return
+      if (!designMissing()) return
+
+      toast("[Rollabot] designer finished without writing design.md — auto-saving...", "warning")
+
+      try {
+        // Try fetching messages from the session via SDK
+        const res = await client.session.messages({ path: { id: sessionID }, query: { directory } })
+        const messages: any[] = (res as any).data ?? []
+        const assistantTexts = messages
+          .filter((m: any) => m.role === "assistant")
+          .flatMap((m: any) => (m.parts ?? []).filter((p: any) => p.type === "text").map((p: any) => p.text))
+          .join("\n\n")
+          .trim()
+
+        if (assistantTexts) {
+          const { writeFileSync } = await import("fs")
+          writeFileSync(designPath, `# Design (auto-saved from designer output)\n\n${assistantTexts}`)
+          toast("[Rollabot] design.md auto-created from session messages ✓", "success")
+          return
+        }
+      } catch {}
+
+      // Fallback: use buffered last text output
+      const buffered = lastTextBySession.get(sessionID)?.trim()
+      if (buffered) {
+        const { writeFileSync } = await import("fs")
+        writeFileSync(designPath, `# Design (auto-saved from designer output)\n\n${buffered}`)
+        toast("[Rollabot] design.md auto-created from text buffer ✓", "success")
+        lastTextBySession.delete(sessionID)
+        return
+      }
+
+      toast("[Rollabot] ⛔ could not auto-save design.md — no output found", "error")
     },
 
     // Inject rules every call + agent-specific enforcement
