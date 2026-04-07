@@ -124,7 +124,14 @@ export const server: Plugin = async ({ $, directory, client }) => {
       }
 
       if (parts.length > 0) {
-        output.system[0] = (output.system[0] ?? "") + "\n" + parts.join("\n")
+        const injection = parts.join("\n\n")
+        if (!Array.isArray(output.system) || output.system.length === 0) {
+          // No system messages yet — create one
+          ;(output.system as string[]) = [injection]
+        } else {
+          // Prepend so it appears at the TOP of the system prompt (LLMs weight start heavily)
+          output.system[0] = injection + "\n\n" + output.system[0]
+        }
       }
     },
 
