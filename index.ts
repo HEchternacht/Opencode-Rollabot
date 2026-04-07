@@ -41,14 +41,29 @@ export const server: Plugin = async ({ directory, client }) => {
     agentBySession.get(input.sessionID) ?? (input as any).agent ?? undefined
 
   return {
-    // Track active agent per session + reset design-read reminder on agent switch
-    "chat.params": async (input, _output) => {
+    // Track active agent per session + append designer hint to first user message
+    "chat.params": async (input, output) => {
       const prev = agentBySession.get(input.sessionID)
       if (prev !== input.agent) {
         agentBySession.set(input.sessionID, input.agent)
         designReadSentBySession.delete(input.sessionID)
         firstCallSentBySession.delete(input.sessionID)
         toast(`[Rollabot] agent: ${input.agent}`, "info", 2000)
+      }
+
+      if (!firstCallSentBySession.has(input.sessionID)) {
+        firstCallSentBySession.add(input.sessionID)
+        const msgs: any[] = (output as any).messages ?? (input as any).messages ?? []
+        const lastUser = [...msgs].reverse().find((m: any) => m.role === "user")
+        if (lastUser) {
+          const hint = `\n\n[If this request involves writing or modifying code, call @designer FIRST.]`
+          if (typeof lastUser.content === "string") {
+            lastUser.content += hint
+          } else if (Array.isArray(lastUser.content)) {
+            const textPart = lastUser.content.find((p: any) => p.type === "text")
+            if (textPart) textPart.text += hint
+          }
+        }
       }
     },
 
@@ -122,11 +137,6 @@ export const server: Plugin = async ({ directory, client }) => {
       const agent = resolveAgent(input)
 
       if (reminderContent) parts.push(`RULES:\n${reminderContent}`)
-
-      if (!firstCallSentBySession.has(input.sessionID)) {
-        firstCallSentBySession.add(input.sessionID)
-        parts.push(`If the user's request involves writing or modifying code, call @designer FIRST before doing anything else.`)
-      }
 
       if (agent === "designer") {
         const missing = designMissing()
