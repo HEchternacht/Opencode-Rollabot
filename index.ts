@@ -91,9 +91,10 @@ export const server: Plugin = async ({ $, directory, client }) => {
         const missing = designMissing()
         if (missing) toast(`[Rollabot] designer active — design.md missing`, "warning")
         parts.push(
-          `MANDATORY: write all plans to "${designPath}".\n` +
-          `design.md status: ${missing ? "MISSING or EMPTY ✗ — write it now" : "EXISTS ✓"}\n` +
-          `Use the Write tool. Not done until design.md has content.`
+          `⚠ EVERY RESPONSE YOU GIVE MUST write or append to "${designPath}".\n` +
+          `design.md status: ${missing ? "MISSING or EMPTY ✗ — CREATE it NOW" : "EXISTS ✓ — APPEND your plans to it NOW"}\n` +
+          `Use the Write tool (create) or Edit tool (append). You are NOT done until design.md has content.\n` +
+          `Do NOT respond with text only — always end by writing/appending to design.md.`
         )
       } else if (designMissing()) {
         toast(`[Rollabot] design.md missing — blocking ${agent ?? "agent"}`, "warning")
