@@ -102,6 +102,13 @@ export const server: Plugin = async ({ $, directory, client }) => {
           `⛔ design.md is MISSING or EMPTY ("${designPath}").\n` +
           `Call @designer first. Do NOT write code or todos until design.md exists.`
         )
+      } else {
+        // design.md exists — instruct agent to read it first if starting work
+        parts.push(
+          `📋 design.md EXISTS at "${designPath}".\n` +
+          `If you have not read it yet this session, READ IT NOW before doing anything else.\n` +
+          `A project may already be in progress — use design.md to orient yourself and continue from where it left off.`
+        )
       }
 
       if (parts.length > 0) {
