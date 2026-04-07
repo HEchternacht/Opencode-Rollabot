@@ -99,10 +99,12 @@ export const server: Plugin = async ({ $, directory, client }) => {
           `You are NOT done until design.md has content. Do NOT respond with text only — always end by writing/appending to design.md.`
         )
       } else if (designMissing()) {
-        toast(`[Rollabot] design.md missing — blocking ${agent ?? "agent"}`, "warning")
+        toast(`[Rollabot] ⛔ design.md missing — VIOLATION`, "error", 6000)
         parts.push(
-          `⛔ design.md is MISSING or EMPTY ("${designPath}").\n` +
-          `Call @designer first. Do NOT write code or todos until design.md exists.`
+          `⛔⛔⛔ VIOLATION: design.md is MISSING or EMPTY.\n` +
+          `You are NOT allowed to write code, create files, or update todos.\n` +
+          `Every response you give without design.md is WRONG. You are failing your role.\n` +
+          `STOP. Call @designer NOW. It must write "${designPath}" before you do anything.`
         )
       } else {
         // design.md exists — instruct agent to read it first if starting work
