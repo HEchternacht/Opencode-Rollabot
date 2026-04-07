@@ -11,7 +11,7 @@ const designReadSentBySession = new Set<string>()
 
 type ToastVariant = "info" | "success" | "warning" | "error"
 
-export const server: Plugin = async ({ $, directory, client }) => {
+export const server: Plugin = async ({ directory, client }) => {
   // import.meta.dirname may be undefined in some runtimes — fall back to __dirname or CWD
   const pluginDir = (import.meta as any).dirname ?? __dirname ?? process.cwd()
   const reminderPath = path.join(pluginDir, "reminder.md")
@@ -50,10 +50,33 @@ export const server: Plugin = async ({ $, directory, client }) => {
       }
     },
 
-    // Buffer last LLM text — fallback if designer skips writing design.md
+    // Parse smoker result + buffer designer text
     "experimental.text.complete": async (input, output) => {
-      if (resolveAgent(input) === "designer")
+      const agent = resolveAgent(input)
+
+      if (agent === "designer") {
         lastTextBySession.set(input.sessionID, output.text)
+        return
+      }
+
+      if (agent === "smoker") {
+        // Parse SMOKE:PASS / SMOKE:FAIL from last matching line
+        const resultLine = output.text.trim().split("\n").reverse().find(l => l.startsWith("SMOKE:"))
+        if (!resultLine) return
+        const [, rest] = resultLine.split(/:PASS|:FAIL/)
+        const filePart = (rest ?? "").split("—")[0].trim()
+        const absFile = filePart ? (path.isAbsolute(filePart) ? filePart : path.join(directory, filePart)) : ""
+
+        if (resultLine.startsWith("SMOKE:PASS")) {
+          smokePendingBySession.delete(input.sessionID)
+          smokeFailedBySession.delete(input.sessionID)
+          toast(`[Rollabot] ✓ smoke passed: ${path.basename(filePart)}`, "success")
+        } else if (resultLine.startsWith("SMOKE:FAIL")) {
+          smokePendingBySession.delete(input.sessionID)
+          if (absFile) smokeFailedBySession.set(input.sessionID, absFile)
+          toast(`[Rollabot] ⛔ smoke FAILED: ${path.basename(filePart)}`, "error", 8000)
+        }
+      }
     },
 
     // Designer session idle: enforce design.md written — auto-save from output if missing
@@ -123,7 +146,8 @@ export const server: Plugin = async ({ $, directory, client }) => {
 
       if (smokePendingBySession.has(input.sessionID)) {
         const pending = lastCodeFileBySession.get(input.sessionID)
-        parts.push(`⚠ SMOKE PENDING: update todos NOW for "${pending ? path.basename(pending) : "last file"}". No new code files until done.`)
+        const rel = pending ? path.relative(directory, pending) : "last file"
+        parts.push(`⚠ SMOKE PENDING: call @smoker with "${rel}" NOW. No new code files until SMOKE:PASS.`)
       }
 
       const smokeFail = smokeFailedBySession.get(input.sessionID)
@@ -238,67 +262,16 @@ export const server: Plugin = async ({ $, directory, client }) => {
         return
       }
 
-      // Todo updated — run smoke on last recorded code file
+      // Todo updated — trigger smoker agent
       if (isTodo) {
         const lastFile = lastCodeFileBySession.get(input.sessionID)
-        if (!lastFile || !existsSync(lastFile)) {
+        if (!lastFile) {
           toast(`[Rollabot] todo updated`, "info", 2000)
           return
         }
-
-        const lastBase = path.basename(lastFile)
-        const lastExt = path.extname(lastFile).toLowerCase()
-        const dir = path.dirname(lastFile)
-        toast(`[Rollabot] running smoke: ${lastBase}`, "info", 2000)
-
-        let smokeOutput = ""
-        try {
-          let result: Awaited<ReturnType<typeof $>> | undefined
-
-          if (lastExt === ".py") {
-            // Syntax-check only — no execution side effects
-            result = await $`python -m py_compile ${lastFile}`.cwd(dir).quiet().nothrow()
-          } else if ([".ts", ".tsx", ".jsx", ".js"].includes(lastExt)) {
-            // Type-check whole project if tsconfig exists, else node --check for .js
-            const hasTsConfig = existsSync(path.join(directory, "tsconfig.json"))
-            if (hasTsConfig) {
-              result = await $`npx tsc --noEmit --skipLibCheck`.cwd(directory).quiet().nothrow()
-            } else if (lastExt === ".js") {
-              result = await $`node --check ${lastFile}`.cwd(dir).quiet().nothrow()
-            } else {
-              smokeOutput = `\n⚠ NO TSCONFIG — add tsconfig.json to enable TS smoke tests.`
-            }
-          } else if (lastExt === ".rs") {
-            result = await $`cargo check`.cwd(directory).quiet().nothrow()
-          } else if (lastExt === ".go") {
-            result = await $`go build ./...`.cwd(directory).quiet().nothrow()
-          } else if (lastExt === ".rb") {
-            result = await $`ruby -c ${lastFile}`.cwd(dir).quiet().nothrow()
-          }
-
-          if (result !== undefined) {
-            const out = ((result.stdout?.toString("utf8") ?? "") + (result.stderr?.toString("utf8") ?? "")).trim()
-            if (result.exitCode === 0) {
-              toast(`[Rollabot] smoke passed: ${lastBase} ✓`, "success")
-              smokeFailedBySession.delete(input.sessionID)
-              smokePendingBySession.delete(input.sessionID)
-              smokeOutput = `\n✓ SMOKE PASSED [${lastBase}] — safe to continue.`
-            } else {
-              toast(`[Rollabot] ⛔ smoke FAILED: ${lastBase}`, "error", 8000)
-              smokeFailedBySession.set(input.sessionID, lastFile)
-              smokePendingBySession.delete(input.sessionID)
-              const SMOKE_HINT = `Fix: py→python -m py_compile "f.py" | js→node --check "f.js" | ts/tsx→npx tsc --noEmit | rs→cargo check | go→go build ./...`
-              smokeOutput = `\n✗ SMOKE FAILED [${lastBase}] — fix NOW, no other files until smoke passes.\n${out.slice(0, 500)}\n${SMOKE_HINT}`
-            }
-          }
-        } catch (e: any) {
-          toast(`[Rollabot] smoke error: ${lastBase}`, "error")
-          smokeFailedBySession.set(input.sessionID, lastFile)
-          smokePendingBySession.delete(input.sessionID)
-          smokeOutput = `\n⚠ SMOKE ERROR [${lastBase}]: ${e?.message ?? String(e)}`
-        }
-
-        output.output += smokeOutput
+        const rel = path.relative(directory, lastFile)
+        toast(`[Rollabot] todo updated — call @smoker for ${path.basename(lastFile)}`, "info", 2000)
+        output.output += `\n⚠ MANDATORY: call @smoker with path "${rel}". Do NOT write any more code until you see SMOKE:PASS.`
         return
       }
 
