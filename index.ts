@@ -6,13 +6,25 @@ const agentBySession = new Map<string, string>()
 const lastTextBySession = new Map<string, string>()
 const lastCodeFileBySession = new Map<string, string>()
 const smokeFailedBySession = new Map<string, string>()
-const designReadSentBySession = new Set<string>() // only remind "read design.md" once per session
+const smokePendingBySession = new Set<string>() // code written, todo not updated yet
+const designReadSentBySession = new Set<string>()
 
 type ToastVariant = "info" | "success" | "warning" | "error"
 
 export const server: Plugin = async ({ $, directory, client }) => {
-  const reminderPath = path.join(import.meta.dirname, "reminder.md")
+  // import.meta.dirname may be undefined in some runtimes — fall back to __dirname or CWD
+  const pluginDir = (import.meta as any).dirname ?? __dirname ?? process.cwd()
+  const reminderPath = path.join(pluginDir, "reminder.md")
   const designPath = path.join(directory, "design.md")
+
+  // Load reminder once at startup — toast if missing so user knows immediately
+  let reminderContent = ""
+  try {
+    reminderContent = readFileSync(reminderPath, "utf8").trim()
+    if (!reminderContent) throw new Error("empty")
+  } catch (e: any) {
+    client.tui.showToast({ body: { message: `[Rollabot] ⚠ reminder.md not loaded: ${e?.message ?? e} (path: ${reminderPath})`, variant: "error", duration: 8000 }, query: { directory } }).catch(() => {})
+  }
 
   const designExists = () => existsSync(designPath)
   const designEmpty = () => {
@@ -84,10 +96,7 @@ export const server: Plugin = async ({ $, directory, client }) => {
       const parts: string[] = []
       const agent = resolveAgent(input)
 
-      try {
-        const reminder = readFileSync(reminderPath, "utf8").trim()
-        if (reminder) parts.push(`RULES:\n${reminder}`)
-      } catch {}
+      if (reminderContent) parts.push(`RULES:\n${reminderContent}`)
 
       if (agent === "designer") {
         const missing = designMissing()
@@ -112,11 +121,14 @@ export const server: Plugin = async ({ $, directory, client }) => {
         )
       }
 
+      if (smokePendingBySession.has(input.sessionID)) {
+        const pending = lastCodeFileBySession.get(input.sessionID)
+        parts.push(`⚠ SMOKE PENDING: update todos NOW for "${pending ? path.basename(pending) : "last file"}". No new code files until done.`)
+      }
+
       const smokeFail = smokeFailedBySession.get(input.sessionID)
       if (smokeFail) {
-        parts.push(
-          `⛔ SMOKE FAILING: "${path.basename(smokeFail)}" — fix it before any other file.`
-        )
+        parts.push(`⛔ SMOKE FAILING: "${path.basename(smokeFail)}" — fix it before any other file.`)
       }
 
       if (parts.length > 0) {
@@ -147,6 +159,16 @@ export const server: Plugin = async ({ $, directory, client }) => {
       if (smokeFail && path.resolve(filePath) !== path.resolve(smokeFail)) {
         toast(`[Rollabot] ⛔ blocked — fix smoke in ${path.basename(smokeFail)} first`, "error")
         throw new Error(`Smoke FAILING in "${smokeFail}". Fix it before writing anything else.`)
+      }
+
+      // Block next code file while smoke test is still pending (todo not updated yet)
+      const ext2 = path.extname(filePath).toLowerCase()
+      const CODE_EXTS2 = [".py", ".js", ".ts", ".jsx", ".tsx", ".rs", ".go", ".rb"]
+      const isDesignFile2 = path.basename(filePath).toLowerCase() === "design.md"
+      if (smokePendingBySession.has(input.sessionID) && CODE_EXTS2.includes(ext2) && !isDesignFile2) {
+        const pending = lastCodeFileBySession.get(input.sessionID)
+        toast(`[Rollabot] ⛔ update todos first — smoke pending for ${pending ? path.basename(pending) : "last file"}`, "error")
+        throw new Error(`Update todos first to run smoke test for "${pending ?? "last file"}". No new code files until smoke clears.`)
       }
 
       const ext = path.extname(filePath).toLowerCase()
@@ -210,8 +232,9 @@ export const server: Plugin = async ({ $, directory, client }) => {
       // Code file written — record for smoke on next todo update (skip .d.ts)
       if (CODE_EXTS.includes(ext) && !isTypeOnly) {
         lastCodeFileBySession.set(input.sessionID, absPath)
-        toast(`[Rollabot] ${base} written — smoke pending`, "info", 2000)
-        output.output += `\n📋 Update todos to trigger smoke for "${base}".`
+        smokePendingBySession.add(input.sessionID)
+        toast(`[Rollabot] ${base} written — smoke pending`, "warning", 3000)
+        output.output += `\n⚠ SMOKE PENDING: update todos NOW to run smoke for "${base}". Cannot write another code file until smoke clears.`
         return
       }
 
@@ -258,10 +281,12 @@ export const server: Plugin = async ({ $, directory, client }) => {
             if (result.exitCode === 0) {
               toast(`[Rollabot] smoke passed: ${lastBase} ✓`, "success")
               smokeFailedBySession.delete(input.sessionID)
+              smokePendingBySession.delete(input.sessionID)
               smokeOutput = `\n✓ SMOKE PASSED [${lastBase}] — safe to continue.`
             } else {
               toast(`[Rollabot] ⛔ smoke FAILED: ${lastBase}`, "error", 8000)
               smokeFailedBySession.set(input.sessionID, lastFile)
+              smokePendingBySession.delete(input.sessionID)
               const SMOKE_HINT = `Fix: py→python -m py_compile "f.py" | js→node --check "f.js" | ts/tsx→npx tsc --noEmit | rs→cargo check | go→go build ./...`
               smokeOutput = `\n✗ SMOKE FAILED [${lastBase}] — fix NOW, no other files until smoke passes.\n${out.slice(0, 500)}\n${SMOKE_HINT}`
             }
@@ -269,6 +294,7 @@ export const server: Plugin = async ({ $, directory, client }) => {
         } catch (e: any) {
           toast(`[Rollabot] smoke error: ${lastBase}`, "error")
           smokeFailedBySession.set(input.sessionID, lastFile)
+          smokePendingBySession.delete(input.sessionID)
           smokeOutput = `\n⚠ SMOKE ERROR [${lastBase}]: ${e?.message ?? String(e)}`
         }
 
