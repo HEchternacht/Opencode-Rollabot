@@ -71,15 +71,15 @@ export const server: Plugin = async ({ directory, client }) => {
       const currentUser = [...getMsgs()].reverse().find((m: any) => m.role === "user")
       if (currentUser) {
         const text = getMsgText(currentUser)
-        if (/^\/cm\b/i.test(text.trim())) {
+        if (text.includes("ROLLABOT_CM_TOGGLE")) {
           if (cavemodeBySession.has(input.sessionID)) {
             cavemodeBySession.delete(input.sessionID)
             toast("[Rollabot] cavemode OFF", "info", 2000)
           } else {
             cavemodeBySession.add(input.sessionID)
-            toast("[Rollabot] cavemode ON 🪨", "success", 2000)
+            toast("[Rollabot] cavemode ON", "success", 2000)
           }
-          setMsgText(currentUser, text.replace(/^\/cm\s*/i, "").trim())
+          setMsgText(currentUser, text.replace(/ROLLABOT_CM_TOGGLE\s*/g, "").trim())
         }
       }
 
