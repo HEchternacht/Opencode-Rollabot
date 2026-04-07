@@ -3,7 +3,7 @@ mode: subagent
 description: "Reads codebase, reasons about implementation, writes technical design to design.md"
 hidden: true
 permission:
-  edit: deny
+  edit: allow
   bash: allow
   write: allow
   webfetch: allow
