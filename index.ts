@@ -10,6 +10,7 @@ const smokePendingBySession = new Set<string>() // code written, todo not update
 const designReadSentBySession = new Set<string>()
 const firstCallSentBySession = new Set<string>()
 const cavemodeBySession = new Set<string>()
+const pipelineDisabledBySession = new Set<string>()
 
 type ToastVariant = "info" | "success" | "warning" | "error"
 
@@ -70,7 +71,7 @@ export const server: Plugin = async ({ directory, client }) => {
       }
       const currentUser = [...getMsgs()].reverse().find((m: any) => m.role === "user")
       if (currentUser) {
-        const text = getMsgText(currentUser)
+        let text = getMsgText(currentUser)
         if (text.includes("ROLLABOT_CM_TOGGLE")) {
           if (cavemodeBySession.has(input.sessionID)) {
             cavemodeBySession.delete(input.sessionID)
@@ -79,7 +80,18 @@ export const server: Plugin = async ({ directory, client }) => {
             cavemodeBySession.add(input.sessionID)
             toast("[Rollabot] cavemode ON", "success", 2000)
           }
-          setMsgText(currentUser, text.replace(/ROLLABOT_CM_TOGGLE\s*/g, "").trim())
+          text = text.replace(/ROLLABOT_CM_TOGGLE\s*/g, "").trim()
+          setMsgText(currentUser, text)
+        }
+        if (text.includes("ROLLABOT_DESIGN_TOGGLE")) {
+          if (pipelineDisabledBySession.has(input.sessionID)) {
+            pipelineDisabledBySession.delete(input.sessionID)
+            toast("[Rollabot] design+smoke pipeline ON", "success", 3000)
+          } else {
+            pipelineDisabledBySession.add(input.sessionID)
+            toast("[Rollabot] design+smoke pipeline OFF", "warning", 3000)
+          }
+          setMsgText(currentUser, text.replace(/ROLLABOT_DESIGN_TOGGLE\s*/g, "").trim())
         }
       }
 
@@ -97,14 +109,18 @@ export const server: Plugin = async ({ directory, client }) => {
         )
       }
 
-      // First call of session — designer gate
+      // First call of session — designer gate (pipeline-gated)
       if (!firstCallSentBySession.has(input.sessionID)) {
         firstCallSentBySession.add(input.sessionID)
-        parts.push(`If this request involves writing or modifying code, call @designer FIRST.`)
+        if (!pipelineDisabledBySession.has(input.sessionID))
+          parts.push(`If this request involves writing or modifying code, call @designer FIRST.`)
       }
 
+      const pipelineOn = !pipelineDisabledBySession.has(input.sessionID)
+      if (!pipelineOn) parts.push(`⚙ design+smoke pipeline DISABLED. No design.md or smoke enforcement.`)
+
       // Designer-specific
-      if (agent === "designer") {
+      if (pipelineOn && agent === "designer") {
         const missing = designMissing()
         if (missing) toast(`[Rollabot] designer active — design.md missing`, "warning")
         parts.push(
@@ -112,27 +128,27 @@ export const server: Plugin = async ({ directory, client }) => {
           `design.md: ${missing ? "MISSING ✗ — CREATE it NOW" : "EXISTS ✓ — APPEND your plans NOW"}\n` +
           `NEVER use bash/heredoc. Not done until design.md has content.`
         )
-      } else if (designMissing()) {
+      } else if (pipelineOn && designMissing()) {
         toast(`[Rollabot] ⛔ design.md missing — VIOLATION`, "error", 6000)
         parts.push(
           `⛔⛔⛔ VIOLATION: design.md MISSING.\n` +
           `You CANNOT write code, files, or todos. You are failing your role.\n` +
           `STOP. Call @designer NOW to write design.md first.`
         )
-      } else if (!designReadSentBySession.has(input.sessionID)) {
+      } else if (pipelineOn && !designReadSentBySession.has(input.sessionID)) {
         designReadSentBySession.add(input.sessionID)
         parts.push(`📋 design.md exists. READ IT NOW before doing anything — a project may be in progress.`)
       }
 
-      // Smoke state
-      if (smokePendingBySession.has(input.sessionID)) {
+      // Smoke state (pipeline-gated)
+      if (pipelineOn && smokePendingBySession.has(input.sessionID)) {
         const pending = lastCodeFileBySession.get(input.sessionID)
         const rel = pending ? path.relative(directory, pending) : "last file"
         parts.push(`⚠ SMOKE PENDING: call @smoker with "${rel}" NOW. No new code files until SMOKE:PASS.`)
       }
-      const smokeFail = smokeFailedBySession.get(input.sessionID)
-      if (smokeFail) {
-        parts.push(`⛔ SMOKE FAILING: "${path.basename(smokeFail)}" — fix it before any other file.`)
+      if (pipelineOn) {
+        const smokeFail = smokeFailedBySession.get(input.sessionID)
+        if (smokeFail) parts.push(`⛔ SMOKE FAILING: "${path.basename(smokeFail)}" — fix it before any other file.`)
       }
 
       // Strip old injections from ALL past user messages, inject only into current one
@@ -232,6 +248,7 @@ export const server: Plugin = async ({ directory, client }) => {
 
     // Gate writes behind design.md + smoke state
     "tool.execute.before": async (input, output) => {
+      if (pipelineDisabledBySession.has(input.sessionID)) return
       if (!["write", "edit"].includes(input.tool.toLowerCase())) return
 
       // FIX: try input.args first (correct), fall back to output.args (mutable copy)
@@ -285,6 +302,7 @@ export const server: Plugin = async ({ directory, client }) => {
 
     // After writes: verify design.md for designer; record code files; smoke on todo update
     "tool.execute.after": async (input, output) => {
+      if (pipelineDisabledBySession.has(input.sessionID)) return
       if (!["write", "edit"].includes(input.tool.toLowerCase())) return
 
       const filePath: string = input.args?.filePath || input.args?.file_path || input.args?.path
