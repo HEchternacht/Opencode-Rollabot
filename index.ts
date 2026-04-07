@@ -9,6 +9,7 @@ const smokeFailedBySession = new Map<string, string>()
 const smokePendingBySession = new Set<string>() // code written, todo not updated yet
 const designReadSentBySession = new Set<string>()
 const firstCallSentBySession = new Set<string>()
+const cavemodeBySession = new Set<string>()
 
 type ToastVariant = "info" | "success" | "warning" | "error"
 
@@ -54,8 +55,47 @@ export const server: Plugin = async ({ directory, client }) => {
       const agent = resolveAgent(input)
       const parts: string[] = []
 
+      // Detect /cm command in current user message — toggle cavemode, strip command from message
+      const getMsgs = () => (output as any).messages ?? (input as any).messages ?? []
+      const getMsgText = (msg: any): string =>
+        typeof msg.content === "string" ? msg.content
+        : (msg.content?.find((p: any) => p.type === "text")?.text ?? "")
+      const setMsgText = (msg: any, text: string) => {
+        if (typeof msg.content === "string") msg.content = text
+        else {
+          const t = msg.content?.find((p: any) => p.type === "text")
+          if (t) t.text = text
+          else msg.content = [{ type: "text", text }]
+        }
+      }
+      const currentUser = [...getMsgs()].reverse().find((m: any) => m.role === "user")
+      if (currentUser) {
+        const text = getMsgText(currentUser)
+        if (/^\/cm\b/i.test(text.trim())) {
+          if (cavemodeBySession.has(input.sessionID)) {
+            cavemodeBySession.delete(input.sessionID)
+            toast("[Rollabot] cavemode OFF", "info", 2000)
+          } else {
+            cavemodeBySession.add(input.sessionID)
+            toast("[Rollabot] cavemode ON 🪨", "success", 2000)
+          }
+          setMsgText(currentUser, text.replace(/^\/cm\s*/i, "").trim())
+        }
+      }
+
       // Always inject reminder rules
       if (reminderContent) parts.push(`RULES:\n${reminderContent}`)
+
+      // Cavemode injection
+      if (cavemodeBySession.has(input.sessionID)) {
+        parts.push(
+          `CAVEMODE ON: strip articles(the/a/an), filler(I will/let me/I'll/great/now I/happy to/I am going to/I need to), narration, preamble.\n` +
+          `Every word must carry info — zero decoration. No restating what was asked.\n` +
+          `Apply same density inside <think> tags: keep step count, cut all fluff per step.\n` +
+          `Bad: "I will now fix the bug on the second line of the file"\n` +
+          `Good: "fix bug line 2"`
+        )
+      }
 
       // First call of session — designer gate
       if (!firstCallSentBySession.has(input.sessionID)) {
