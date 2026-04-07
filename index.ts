@@ -3,9 +3,10 @@ import { readFileSync, existsSync } from "fs"
 import path from "path"
 
 const agentBySession = new Map<string, string>()
-const lastTextBySession = new Map<string, string>() // fallback buffer: last LLM text per session
-const lastCodeFileBySession = new Map<string, string>() // last written code file per session
-const smokeFailedBySession = new Map<string, string>() // session → failing file path
+const lastTextBySession = new Map<string, string>()
+const lastCodeFileBySession = new Map<string, string>()
+const smokeFailedBySession = new Map<string, string>()
+const designReadSentBySession = new Set<string>() // only remind "read design.md" once per session
 
 type ToastVariant = "info" | "success" | "warning" | "error"
 
@@ -22,24 +23,28 @@ export const server: Plugin = async ({ $, directory, client }) => {
   const toast = (message: string, variant: ToastVariant = "info", duration = 4000) =>
     client.tui.showToast({ body: { message, variant, duration }, query: { directory } }).catch(() => {})
 
+  // Resolve agent: prefer live input.agent (fires before chat.params in some hooks)
+  const resolveAgent = (input: any) =>
+    agentBySession.get(input.sessionID) ?? (input as any).agent ?? undefined
+
   return {
-    // Track active agent per session
+    // Track active agent per session + reset design-read reminder on agent switch
     "chat.params": async (input, _output) => {
       const prev = agentBySession.get(input.sessionID)
       if (prev !== input.agent) {
         agentBySession.set(input.sessionID, input.agent)
+        designReadSentBySession.delete(input.sessionID) // new agent → re-remind once
         toast(`[Rollabot] agent: ${input.agent}`, "info", 2000)
       }
     },
 
-    // Buffer last LLM text per session — used as fallback if designer skips writing design.md
+    // Buffer last LLM text — fallback if designer skips writing design.md
     "experimental.text.complete": async (input, output) => {
-      if (agentBySession.get(input.sessionID) === "designer") {
+      if (resolveAgent(input) === "designer")
         lastTextBySession.set(input.sessionID, output.text)
-      }
     },
 
-    // When designer session goes idle: enforce design.md exists — write from output if missing
+    // Designer session idle: enforce design.md written — auto-save from output if missing
     "event": async ({ event }) => {
       if (event.type !== "session.idle") return
       const sessionID = (event as any).properties?.sessionID
@@ -47,17 +52,13 @@ export const server: Plugin = async ({ $, directory, client }) => {
       if (!designMissing()) return
 
       toast("[Rollabot] designer finished without writing design.md — auto-saving...", "warning")
-
       try {
-        // Try fetching messages from the session via SDK
         const res = await client.session.messages({ path: { id: sessionID }, query: { directory } })
         const messages: any[] = (res as any).data ?? []
         const assistantTexts = messages
           .filter((m: any) => m.role === "assistant")
           .flatMap((m: any) => (m.parts ?? []).filter((p: any) => p.type === "text").map((p: any) => p.text))
-          .join("\n\n")
-          .trim()
-
+          .join("\n\n").trim()
         if (assistantTexts) {
           const { writeFileSync } = await import("fs")
           writeFileSync(designPath, `# Design (auto-saved from designer output)\n\n${assistantTexts}`)
@@ -66,7 +67,6 @@ export const server: Plugin = async ({ $, directory, client }) => {
         }
       } catch {}
 
-      // Fallback: use buffered last text output
       const buffered = lastTextBySession.get(sessionID)?.trim()
       if (buffered) {
         const { writeFileSync } = await import("fs")
@@ -79,10 +79,10 @@ export const server: Plugin = async ({ $, directory, client }) => {
       toast("[Rollabot] ⛔ could not auto-save design.md — no output found", "error")
     },
 
-    // Inject rules every call + agent-specific enforcement
+    // Inject rules + agent-specific enforcement at top of system prompt every call
     "experimental.chat.system.transform": async (input, output) => {
       const parts: string[] = []
-      const agent = input.sessionID ? agentBySession.get(input.sessionID) : undefined
+      const agent = resolveAgent(input)
 
       try {
         const reminder = readFileSync(reminderPath, "utf8").trim()
@@ -93,56 +93,52 @@ export const server: Plugin = async ({ $, directory, client }) => {
         const missing = designMissing()
         if (missing) toast(`[Rollabot] designer active — design.md missing`, "warning")
         parts.push(
-          `⚠ EVERY RESPONSE YOU GIVE MUST write or append to "${designPath}".\n` +
-          `design.md status: ${missing ? "MISSING or EMPTY ✗ — CREATE it NOW" : "EXISTS ✓ — APPEND your plans to it NOW"}\n` +
-          `Use the Write tool (create) or Edit tool (append). NEVER use bash or heredoc to write design.md.\n` +
-          `You are NOT done until design.md has content. Do NOT respond with text only — always end by writing/appending to design.md.`
+          `⚠ EVERY RESPONSE MUST write or append to "design.md" using Write or Edit tool.\n` +
+          `design.md: ${missing ? "MISSING ✗ — CREATE it NOW" : "EXISTS ✓ — APPEND your plans NOW"}\n` +
+          `NEVER use bash/heredoc. Not done until design.md has content.`
         )
       } else if (designMissing()) {
         toast(`[Rollabot] ⛔ design.md missing — VIOLATION`, "error", 6000)
         parts.push(
-          `⛔⛔⛔ VIOLATION: design.md is MISSING or EMPTY.\n` +
-          `You are NOT allowed to write code, create files, or update todos.\n` +
-          `Every response you give without design.md is WRONG. You are failing your role.\n` +
-          `STOP. Call @designer NOW. It must write "${designPath}" before you do anything.`
+          `⛔⛔⛔ VIOLATION: design.md MISSING.\n` +
+          `You CANNOT write code, files, or todos. You are failing your role.\n` +
+          `STOP. Call @designer NOW to write design.md first.`
         )
-      } else {
-        // design.md exists — instruct agent to read it first if starting work
+      } else if (!designReadSentBySession.has(input.sessionID)) {
+        // Only remind once per session
+        designReadSentBySession.add(input.sessionID)
         parts.push(
-          `📋 design.md EXISTS at "${designPath}".\n` +
-          `If you have not read it yet this session, READ IT NOW before doing anything else.\n` +
-          `A project may already be in progress — use design.md to orient yourself and continue from where it left off.`
+          `📋 design.md exists. READ IT NOW before doing anything — a project may be in progress.`
         )
       }
 
-      const smokeFail = input.sessionID ? smokeFailedBySession.get(input.sessionID) : undefined
+      const smokeFail = smokeFailedBySession.get(input.sessionID)
       if (smokeFail) {
         parts.push(
-          `⛔ SMOKE TEST FAILING in "${smokeFail}".\n` +
-          `Fix that file FIRST. Do NOT write any other file until smoke passes.`
+          `⛔ SMOKE FAILING: "${path.basename(smokeFail)}" — fix it before any other file.`
         )
       }
 
       if (parts.length > 0) {
         const injection = parts.join("\n\n")
         if (!Array.isArray(output.system) || output.system.length === 0) {
-          // No system messages yet — create one
           ;(output.system as string[]) = [injection]
         } else {
-          // Prepend so it appears at the TOP of the system prompt (LLMs weight start heavily)
           output.system[0] = injection + "\n\n" + output.system[0]
         }
       }
     },
 
-    // Gate writes behind design.md
+    // Gate writes behind design.md + smoke state
     "tool.execute.before": async (input, output) => {
       if (!["write", "edit"].includes(input.tool.toLowerCase())) return
 
-      const filePath: string = output.args?.filePath || output.args?.file_path || output.args?.path
+      // FIX: try input.args first (correct), fall back to output.args (mutable copy)
+      const args = (input as any).args ?? output.args
+      const filePath: string = args?.filePath || args?.file_path || args?.path
       if (!filePath) return
 
-      const agent = agentBySession.get(input.sessionID)
+      const agent = resolveAgent(input)
       const base = path.basename(filePath).toLowerCase()
       const isDesignFile = base === "design.md"
 
@@ -150,8 +146,9 @@ export const server: Plugin = async ({ $, directory, client }) => {
       const smokeFail = smokeFailedBySession.get(input.sessionID)
       if (smokeFail && path.resolve(filePath) !== path.resolve(smokeFail)) {
         toast(`[Rollabot] ⛔ blocked — fix smoke in ${path.basename(smokeFail)} first`, "error")
-        throw new Error(`Smoke test is FAILING in "${smokeFail}". Fix that file before writing anything else.`)
+        throw new Error(`Smoke FAILING in "${smokeFail}". Fix it before writing anything else.`)
       }
+
       const ext = path.extname(filePath).toLowerCase()
       const CODE_EXTS = [".py", ".js", ".ts", ".jsx", ".tsx", ".rs", ".go", ".rb"]
       const isTodo = base.includes("todo") || base.includes("task") || base.includes("checklist")
@@ -160,15 +157,16 @@ export const server: Plugin = async ({ $, directory, client }) => {
 
       if (agent === "designer" && !isDesignFile && designMissing()) {
         toast(`[Rollabot] ⛔ designer tried to write ${base} before design.md`, "error")
-        throw new Error(`Write design.md first. "${designPath}" is missing. Write your plans there before any other file.`)
+        throw new Error(`Write design.md first before any other file.`)
       }
 
       if (isTodo && designMissing()) {
         toast(`[Rollabot] ⛔ todo blocked — design.md missing`, "error")
-        throw new Error(`design.md missing. Call @designer first — it must write "${designPath}" before you create a todo.`)
+        throw new Error(`design.md missing. Call @designer first.`)
       }
 
-      if (agent === "build" && CODE_EXTS.includes(ext) && designMissing()) {
+      // FIX: was agent === "build" — now applies to all non-designer agents
+      if (agent !== "designer" && CODE_EXTS.includes(ext) && designMissing()) {
         toast(`[Rollabot] ⛔ code write blocked — design.md missing`, "error")
         throw new Error(`design.md missing. Call @designer first before writing code.`)
       }
@@ -181,7 +179,7 @@ export const server: Plugin = async ({ $, directory, client }) => {
       const filePath: string = input.args?.filePath || input.args?.file_path || input.args?.path
       if (!filePath) return
 
-      const agent = agentBySession.get(input.sessionID)
+      const agent = resolveAgent(input)
       const absPath = path.isAbsolute(filePath) ? filePath : path.join(directory, filePath)
       const ext = path.extname(filePath).toLowerCase()
       const base = path.basename(filePath)
@@ -192,7 +190,7 @@ export const server: Plugin = async ({ $, directory, client }) => {
 
       output.output ??= ""
 
-      // Designer wrote something — check design.md
+      // Designer wrote — check design.md
       if (agent === "designer") {
         if (isDesignFile) {
           if (designMissing()) {
@@ -200,20 +198,20 @@ export const server: Plugin = async ({ $, directory, client }) => {
             output.output += `\n\n⛔ design.md is empty. Write your plans into it now.`
           } else {
             toast(`[Rollabot] design.md written ✓`, "success")
-            output.output += `\n\n✓ design.md written successfully.`
+            output.output += `\n\n✓ design.md written.`
           }
         } else if (designMissing()) {
           toast(`[Rollabot] ⛔ design.md still missing after write`, "error")
-          output.output += `\n\n⛔ design.md is still MISSING. You are not done. Write "${designPath}" now.`
+          output.output += `\n\n⛔ design.md still MISSING. Write it now.`
         }
         return
       }
 
-      // Code file written — record it for smoke on next todo update (skip .d.ts / type-only)
+      // Code file written — record for smoke on next todo update (skip .d.ts)
       if (CODE_EXTS.includes(ext) && !isTypeOnly) {
         lastCodeFileBySession.set(input.sessionID, absPath)
         toast(`[Rollabot] ${base} written — smoke pending`, "info", 2000)
-        output.output += `\n📋 Update todos to trigger smoke test for "${base}".`
+        output.output += `\n📋 Update todos to trigger smoke for "${base}".`
         return
       }
 
@@ -228,32 +226,31 @@ export const server: Plugin = async ({ $, directory, client }) => {
         const lastBase = path.basename(lastFile)
         const lastExt = path.extname(lastFile).toLowerCase()
         const dir = path.dirname(lastFile)
-        toast(`[Rollabot] running smoke test: ${lastBase}`, "info", 2000)
+        toast(`[Rollabot] running smoke: ${lastBase}`, "info", 2000)
 
         let smokeOutput = ""
         try {
           let result: Awaited<ReturnType<typeof $>> | undefined
 
           if (lastExt === ".py") {
-            result = await $`python ${lastFile}`.cwd(dir).quiet().nothrow()
-          } else if (lastExt === ".js") {
-            result = await $`node ${lastFile}`.cwd(dir).quiet().nothrow()
-          } else if (lastExt === ".ts") {
-            result = await $`npx tsx ${lastFile}`.cwd(dir).quiet().nothrow()
-          } else if (lastExt === ".jsx" || lastExt === ".tsx") {
-            const smokeFile = lastFile.replace(/\.(jsx|tsx)$/, `.smoke.${lastExt.slice(1)}`)
-            if (existsSync(smokeFile)) {
-              result = await $`npx tsx ${smokeFile}`.cwd(dir).quiet().nothrow()
+            // Syntax-check only — no execution side effects
+            result = await $`python -m py_compile ${lastFile}`.cwd(dir).quiet().nothrow()
+          } else if ([".ts", ".tsx", ".jsx", ".js"].includes(lastExt)) {
+            // Type-check whole project if tsconfig exists, else node --check for .js
+            const hasTsConfig = existsSync(path.join(directory, "tsconfig.json"))
+            if (hasTsConfig) {
+              result = await $`npx tsc --noEmit --skipLibCheck`.cwd(directory).quiet().nothrow()
+            } else if (lastExt === ".js") {
+              result = await $`node --check ${lastFile}`.cwd(dir).quiet().nothrow()
             } else {
-              toast(`[Rollabot] no smoke file for ${lastBase}`, "warning")
-              smokeOutput = `\n⚠ NO SMOKE FILE [${lastBase}]: create ${path.basename(smokeFile)} to enable smoke.`
+              smokeOutput = `\n⚠ NO TSCONFIG — add tsconfig.json to enable TS smoke tests.`
             }
           } else if (lastExt === ".rs") {
-            result = await $`cargo test smoke`.cwd(directory).quiet().nothrow()
+            result = await $`cargo check`.cwd(directory).quiet().nothrow()
           } else if (lastExt === ".go") {
-            result = await $`go test -run TestSmoke .`.cwd(dir).quiet().nothrow()
+            result = await $`go build ./...`.cwd(directory).quiet().nothrow()
           } else if (lastExt === ".rb") {
-            result = await $`ruby ${lastFile}`.cwd(dir).quiet().nothrow()
+            result = await $`ruby -c ${lastFile}`.cwd(dir).quiet().nothrow()
           }
 
           if (result !== undefined) {
@@ -265,7 +262,8 @@ export const server: Plugin = async ({ $, directory, client }) => {
             } else {
               toast(`[Rollabot] ⛔ smoke FAILED: ${lastBase}`, "error", 8000)
               smokeFailedBySession.set(input.sessionID, lastFile)
-              smokeOutput = `\n✗ SMOKE FAILED [${lastBase}] — fix this file NOW. No other files until smoke passes.\n${out.slice(0, 500)}`
+              const SMOKE_HINT = `Fix: py→python -m py_compile "f.py" | js→node --check "f.js" | ts/tsx→npx tsc --noEmit | rs→cargo check | go→go build ./...`
+              smokeOutput = `\n✗ SMOKE FAILED [${lastBase}] — fix NOW, no other files until smoke passes.\n${out.slice(0, 500)}\n${SMOKE_HINT}`
             }
           }
         } catch (e: any) {
@@ -274,8 +272,7 @@ export const server: Plugin = async ({ $, directory, client }) => {
           smokeOutput = `\n⚠ SMOKE ERROR [${lastBase}]: ${e?.message ?? String(e)}`
         }
 
-        const SMOKE_HINT = `Smoke: py→python "f.py" | js→node "f.js" | ts→npx tsx "f.ts" | tsx→npx tsx "f.smoke.tsx" | rs→cargo test smoke | go→go test -run TestSmoke`
-        output.output += smokeOutput + `\n${SMOKE_HINT}`
+        output.output += smokeOutput
         return
       }
 
