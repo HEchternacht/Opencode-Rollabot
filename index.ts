@@ -208,9 +208,9 @@ export const server: Plugin = async ({ directory, client }) => {
 
       if (agent === "designer" && isDesignFile) return
 
-      if (agent === "designer" && !isDesignFile && designMissing()) {
-        toast(`[Rollabot] ⛔ designer tried to write ${base} before design.md`, "error")
-        throw new Error(`Write design.md first before any other file.`)
+      if (agent === "designer" && !isDesignFile) {
+        toast(`[Rollabot] ⛔ designer blocked — can only write design.md`, "error")
+        throw new Error(`Designer can ONLY write design.md. You tried to write "${base}". Write your plans to design.md instead.`)
       }
 
       if (isTodo && designMissing()) {
