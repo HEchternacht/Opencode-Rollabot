@@ -1,0 +1,13 @@
+{
+  "name": "opencode-rollabot",
+  "version": "1.0.0",
+  "description": "Opencode plugin: designer→build pipeline with design.md enforcement, smoke tests, and toast notifications",
+  "main": "index.ts",
+  "files": ["index.ts", "reminder.md", "agents/"],
+  "keywords": ["opencode", "plugin", "ai", "designer", "smoke-test"],
+  "author": "HEchternacht",
+  "license": "MIT",
+  "dependencies": {
+    "@opencode-ai/plugin": "*"
+  }
+}
