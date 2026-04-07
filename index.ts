@@ -93,8 +93,8 @@ export const server: Plugin = async ({ $, directory, client }) => {
         parts.push(
           `⚠ EVERY RESPONSE YOU GIVE MUST write or append to "${designPath}".\n` +
           `design.md status: ${missing ? "MISSING or EMPTY ✗ — CREATE it NOW" : "EXISTS ✓ — APPEND your plans to it NOW"}\n` +
-          `Use the Write tool (create) or Edit tool (append). You are NOT done until design.md has content.\n` +
-          `Do NOT respond with text only — always end by writing/appending to design.md.`
+          `Use the Write tool (create) or Edit tool (append). NEVER use bash or heredoc to write design.md.\n` +
+          `You are NOT done until design.md has content. Do NOT respond with text only — always end by writing/appending to design.md.`
         )
       } else if (designMissing()) {
         toast(`[Rollabot] design.md missing — blocking ${agent ?? "agent"}`, "warning")
