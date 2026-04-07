@@ -8,6 +8,7 @@ const lastCodeFileBySession = new Map<string, string>()
 const smokeFailedBySession = new Map<string, string>()
 const smokePendingBySession = new Set<string>() // code written, todo not updated yet
 const designReadSentBySession = new Set<string>()
+const firstCallSentBySession = new Set<string>()
 
 type ToastVariant = "info" | "success" | "warning" | "error"
 
@@ -45,7 +46,8 @@ export const server: Plugin = async ({ directory, client }) => {
       const prev = agentBySession.get(input.sessionID)
       if (prev !== input.agent) {
         agentBySession.set(input.sessionID, input.agent)
-        designReadSentBySession.delete(input.sessionID) // new agent → re-remind once
+        designReadSentBySession.delete(input.sessionID)
+        firstCallSentBySession.delete(input.sessionID)
         toast(`[Rollabot] agent: ${input.agent}`, "info", 2000)
       }
     },
@@ -120,6 +122,11 @@ export const server: Plugin = async ({ directory, client }) => {
       const agent = resolveAgent(input)
 
       if (reminderContent) parts.push(`RULES:\n${reminderContent}`)
+
+      if (!firstCallSentBySession.has(input.sessionID)) {
+        firstCallSentBySession.add(input.sessionID)
+        parts.push(`If the user's request involves writing or modifying code, call @designer FIRST before doing anything else.`)
+      }
 
       if (agent === "designer") {
         const missing = designMissing()
