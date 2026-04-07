@@ -41,7 +41,7 @@ export const server: Plugin = async ({ directory, client }) => {
     agentBySession.get(input.sessionID) ?? (input as any).agent ?? undefined
 
   return {
-    // Track active agent per session + append designer hint to first user message
+    // Track active agent + inject all rules/state into user message every call
     "chat.params": async (input, output) => {
       const prev = agentBySession.get(input.sessionID)
       if (prev !== input.agent) {
@@ -51,17 +51,76 @@ export const server: Plugin = async ({ directory, client }) => {
         toast(`[Rollabot] agent: ${input.agent}`, "info", 2000)
       }
 
+      const agent = resolveAgent(input)
+      const parts: string[] = []
+
+      // Always inject reminder rules
+      if (reminderContent) parts.push(`RULES:\n${reminderContent}`)
+
+      // First call of session — designer gate
       if (!firstCallSentBySession.has(input.sessionID)) {
         firstCallSentBySession.add(input.sessionID)
-        const msgs: any[] = (output as any).messages ?? (input as any).messages ?? []
+        parts.push(`If this request involves writing or modifying code, call @designer FIRST.`)
+      }
+
+      // Designer-specific
+      if (agent === "designer") {
+        const missing = designMissing()
+        if (missing) toast(`[Rollabot] designer active — design.md missing`, "warning")
+        parts.push(
+          `⚠ YOU MUST write or append to "design.md" using Write or Edit tool.\n` +
+          `design.md: ${missing ? "MISSING ✗ — CREATE it NOW" : "EXISTS ✓ — APPEND your plans NOW"}\n` +
+          `NEVER use bash/heredoc. Not done until design.md has content.`
+        )
+      } else if (designMissing()) {
+        toast(`[Rollabot] ⛔ design.md missing — VIOLATION`, "error", 6000)
+        parts.push(
+          `⛔⛔⛔ VIOLATION: design.md MISSING.\n` +
+          `You CANNOT write code, files, or todos. You are failing your role.\n` +
+          `STOP. Call @designer NOW to write design.md first.`
+        )
+      } else if (!designReadSentBySession.has(input.sessionID)) {
+        designReadSentBySession.add(input.sessionID)
+        parts.push(`📋 design.md exists. READ IT NOW before doing anything — a project may be in progress.`)
+      }
+
+      // Smoke state
+      if (smokePendingBySession.has(input.sessionID)) {
+        const pending = lastCodeFileBySession.get(input.sessionID)
+        const rel = pending ? path.relative(directory, pending) : "last file"
+        parts.push(`⚠ SMOKE PENDING: call @smoker with "${rel}" NOW. No new code files until SMOKE:PASS.`)
+      }
+      const smokeFail = smokeFailedBySession.get(input.sessionID)
+      if (smokeFail) {
+        parts.push(`⛔ SMOKE FAILING: "${path.basename(smokeFail)}" — fix it before any other file.`)
+      }
+
+      // Strip old injections from ALL past user messages, inject only into current one
+      const STRIP = /\n\n---\n[\s\S]*?\n---/g
+      const stripMsg = (msg: any) => {
+        if (typeof msg.content === "string") {
+          msg.content = msg.content.replace(STRIP, "")
+        } else if (Array.isArray(msg.content)) {
+          const t = msg.content.find((p: any) => p.type === "text")
+          if (t) t.text = t.text.replace(STRIP, "")
+        }
+      }
+
+      const msgs: any[] = (output as any).messages ?? (input as any).messages ?? []
+      for (const msg of msgs) {
+        if (msg.role === "user") stripMsg(msg)
+      }
+
+      if (parts.length > 0) {
+        const injection = `\n\n---\n${parts.join("\n\n")}\n---`
         const lastUser = [...msgs].reverse().find((m: any) => m.role === "user")
         if (lastUser) {
-          const hint = `\n\n[If this request involves writing or modifying code, call @designer FIRST.]`
           if (typeof lastUser.content === "string") {
-            lastUser.content += hint
+            lastUser.content += injection
           } else if (Array.isArray(lastUser.content)) {
-            const textPart = lastUser.content.find((p: any) => p.type === "text")
-            if (textPart) textPart.text += hint
+            const t = lastUser.content.find((p: any) => p.type === "text")
+            if (t) t.text += injection
+            else lastUser.content.push({ type: "text", text: injection })
           }
         }
       }
@@ -129,57 +188,6 @@ export const server: Plugin = async ({ directory, client }) => {
       }
 
       toast("[Rollabot] ⛔ could not auto-save design.md — no output found", "error")
-    },
-
-    // Inject rules + agent-specific enforcement at top of system prompt every call
-    "experimental.chat.system.transform": async (input, output) => {
-      const parts: string[] = []
-      const agent = resolveAgent(input)
-
-      if (reminderContent) parts.push(`RULES:\n${reminderContent}`)
-
-      if (agent === "designer") {
-        const missing = designMissing()
-        if (missing) toast(`[Rollabot] designer active — design.md missing`, "warning")
-        parts.push(
-          `⚠ EVERY RESPONSE MUST write or append to "design.md" using Write or Edit tool.\n` +
-          `design.md: ${missing ? "MISSING ✗ — CREATE it NOW" : "EXISTS ✓ — APPEND your plans NOW"}\n` +
-          `NEVER use bash/heredoc. Not done until design.md has content.`
-        )
-      } else if (designMissing()) {
-        toast(`[Rollabot] ⛔ design.md missing — VIOLATION`, "error", 6000)
-        parts.push(
-          `⛔⛔⛔ VIOLATION: design.md MISSING.\n` +
-          `You CANNOT write code, files, or todos. You are failing your role.\n` +
-          `STOP. Call @designer NOW to write design.md first.`
-        )
-      } else if (!designReadSentBySession.has(input.sessionID)) {
-        // Only remind once per session
-        designReadSentBySession.add(input.sessionID)
-        parts.push(
-          `📋 design.md exists. READ IT NOW before doing anything — a project may be in progress.`
-        )
-      }
-
-      if (smokePendingBySession.has(input.sessionID)) {
-        const pending = lastCodeFileBySession.get(input.sessionID)
-        const rel = pending ? path.relative(directory, pending) : "last file"
-        parts.push(`⚠ SMOKE PENDING: call @smoker with "${rel}" NOW. No new code files until SMOKE:PASS.`)
-      }
-
-      const smokeFail = smokeFailedBySession.get(input.sessionID)
-      if (smokeFail) {
-        parts.push(`⛔ SMOKE FAILING: "${path.basename(smokeFail)}" — fix it before any other file.`)
-      }
-
-      if (parts.length > 0) {
-        const injection = parts.join("\n\n")
-        if (!Array.isArray(output.system) || output.system.length === 0) {
-          ;(output.system as string[]) = [injection]
-        } else {
-          output.system[0] = injection + "\n\n" + output.system[0]
-        }
-      }
     },
 
     // Gate writes behind design.md + smoke state
