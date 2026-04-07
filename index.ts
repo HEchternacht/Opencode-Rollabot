@@ -50,7 +50,13 @@ export const server: Plugin = async ({ directory, client }) => {
         agentBySession.set(input.sessionID, input.agent)
         designReadSentBySession.delete(input.sessionID)
         firstCallSentBySession.delete(input.sessionID)
-        toast(`[Rollabot] agent: ${input.agent}`, "info", 2000)
+        const agentLabel: Record<string, string> = {
+          designer: "Designer invoked",
+          smoker: "Smoker invoked",
+          coder: "Coder invoked",
+          plan: "Plan agent invoked",
+        }
+        toast(`[Rollabot] ${agentLabel[input.agent] ?? `Agent: ${input.agent}`}`, "info", 2500)
       }
 
       const agent = resolveAgent(input)
@@ -300,12 +306,44 @@ export const server: Plugin = async ({ directory, client }) => {
       }
     },
 
-    // After writes: verify design.md for designer; record code files; smoke on todo update
+    // Verbose toast for every tool action
     "tool.execute.after": async (input, output) => {
-      if (pipelineDisabledBySession.has(input.sessionID)) return
-      if (!["write", "edit"].includes(input.tool.toLowerCase())) return
+      const tool = input.tool.toLowerCase()
+      const args: any = input.args ?? {}
 
-      const filePath: string = input.args?.filePath || input.args?.file_path || input.args?.path
+      // Per-tool verbose toasts
+      if (tool === "write") {
+        const f = args.filePath ?? args.file_path ?? args.path ?? "?"
+        toast(`[Rollabot] File written: ${path.basename(f)}`, "success", 2500)
+      } else if (tool === "edit") {
+        const f = args.filePath ?? args.file_path ?? args.path ?? "?"
+        toast(`[Rollabot] File edited: ${path.basename(f)}`, "info", 2500)
+      } else if (tool === "read") {
+        const f = args.filePath ?? args.file_path ?? args.path ?? "?"
+        toast(`[Rollabot] Read: ${path.basename(f)}`, "info", 1500)
+      } else if (tool === "bash") {
+        const cmd = String(args.command ?? args.cmd ?? "").slice(0, 60)
+        toast(`[Rollabot] Bash: ${cmd}${cmd.length === 60 ? "..." : ""}`, "info", 2000)
+      } else if (tool === "glob") {
+        toast(`[Rollabot] Glob: ${args.pattern ?? "?"}`, "info", 1500)
+      } else if (tool === "grep") {
+        toast(`[Rollabot] Grep: ${args.pattern ?? "?"}`, "info", 1500)
+      } else if (tool === "webfetch") {
+        const url = String(args.url ?? args.URL ?? "").slice(0, 70)
+        toast(`[Rollabot] Fetch: ${url}`, "info", 2000)
+      } else if (tool === "websearch") {
+        const q = String(args.query ?? args.q ?? "").slice(0, 60)
+        toast(`[Rollabot] Search: ${q}`, "info", 2000)
+      } else if (tool === "task") {
+        const desc = String(args.description ?? args.prompt ?? "").slice(0, 60)
+        toast(`[Rollabot] Subtask: ${desc}`, "info", 2000)
+      }
+
+      // Pipeline enforcement — write/edit only
+      if (pipelineDisabledBySession.has(input.sessionID)) return
+      if (!["write", "edit"].includes(tool)) return
+
+      const filePath: string = args.filePath ?? args.file_path ?? args.path
       if (!filePath) return
 
       const agent = resolveAgent(input)
@@ -323,43 +361,42 @@ export const server: Plugin = async ({ directory, client }) => {
       if (agent === "designer") {
         if (isDesignFile) {
           if (designMissing()) {
-            toast(`[Rollabot] ⛔ design.md written but empty`, "error")
+            toast(`[Rollabot] design.md empty after write`, "error")
             output.output += `\n\n⛔ design.md is empty. Write your plans into it now.`
           } else {
             toast(`[Rollabot] design.md written ✓`, "success")
             output.output += `\n\n✓ design.md written.`
           }
         } else if (designMissing()) {
-          toast(`[Rollabot] ⛔ design.md still missing after write`, "error")
+          toast(`[Rollabot] design.md still missing`, "error")
           output.output += `\n\n⛔ design.md still MISSING. Write it now.`
         }
         return
       }
 
-      // Code file written — record for smoke on next todo update (skip .d.ts)
+      // Code file — record for smoke on next todo update (skip .d.ts)
       if (CODE_EXTS.includes(ext) && !isTypeOnly) {
         lastCodeFileBySession.set(input.sessionID, absPath)
         smokePendingBySession.add(input.sessionID)
-        toast(`[Rollabot] ${base} written — smoke pending`, "warning", 3000)
+        toast(`[Rollabot] Smoke pending: ${base}`, "warning", 3000)
         output.output += `\n⚠ SMOKE PENDING: update todos NOW to run smoke for "${base}". Cannot write another code file until smoke clears.`
         return
       }
 
-      // Todo updated — trigger smoker agent
+      // Todo updated — trigger smoker
       if (isTodo) {
         const lastFile = lastCodeFileBySession.get(input.sessionID)
         if (!lastFile) {
-          toast(`[Rollabot] todo updated`, "info", 2000)
+          toast(`[Rollabot] Todo updated`, "info", 2000)
           return
         }
         const rel = path.relative(directory, lastFile)
-        toast(`[Rollabot] todo updated — call @smoker for ${path.basename(lastFile)}`, "info", 2000)
+        toast(`[Rollabot] Todo updated — smoker needed: ${path.basename(lastFile)}`, "warning", 3000)
         output.output += `\n⚠ MANDATORY: call @smoker with path "${rel}". Do NOT write any more code until you see SMOKE:PASS.`
         return
       }
 
-      // Other file written
-      toast(`[Rollabot] file written: ${base}`, "info", 2000)
+      toast(`[Rollabot] File written: ${base}`, "info", 2000)
     },
   }
 }
