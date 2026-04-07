@@ -3,16 +3,18 @@
 
 $ErrorActionPreference = "Stop"
 
-$configDir  = "$env:USERPROFILE\.config\opencode"
-$pluginDir  = "$configDir\plugins\rollabot"
-$agentsDir  = "$configDir\agents"
-$configFile = "$configDir\opencode.json"
+$configDir   = "$env:USERPROFILE\.config\opencode"
+$pluginDir   = "$configDir\plugins\rollabot"
+$agentsDir   = "$configDir\agents"
+$commandsDir = "$configDir\commands"
+$configFile  = "$configDir\opencode.json"
 
 Write-Host "[Rollabot] Installing..."
 
 # Create dirs
-New-Item -ItemType Directory -Force -Path $pluginDir | Out-Null
-New-Item -ItemType Directory -Force -Path $agentsDir | Out-Null
+New-Item -ItemType Directory -Force -Path $pluginDir   | Out-Null
+New-Item -ItemType Directory -Force -Path $agentsDir   | Out-Null
+New-Item -ItemType Directory -Force -Path $commandsDir | Out-Null
 
 # Copy plugin files
 Copy-Item -Path "index.ts"    -Destination "$pluginDir\index.ts"    -Force
@@ -22,6 +24,10 @@ Write-Host "[Rollabot] Plugin files copied to $pluginDir"
 # Copy agents
 Copy-Item -Path "agents\*.md" -Destination "$agentsDir\" -Force
 Write-Host "[Rollabot] Agent files copied to $agentsDir"
+
+# Copy commands
+Copy-Item -Path "commands\*.md" -Destination "$commandsDir\" -Force
+Write-Host "[Rollabot] Commands copied to $commandsDir"
 
 # Register plugin in opencode.json
 $pluginPath = ($pluginDir + "\index.ts") -replace "\\", "/"

@@ -6,12 +6,14 @@ set -e
 CONFIG_DIR="$HOME/.config/opencode"
 PLUGIN_DIR="$CONFIG_DIR/plugins/rollabot"
 AGENTS_DIR="$CONFIG_DIR/agents"
+COMMANDS_DIR="$CONFIG_DIR/commands"
 CONFIG_FILE="$CONFIG_DIR/opencode.json"
 
 echo "[Rollabot] Installing..."
 
 mkdir -p "$PLUGIN_DIR"
 mkdir -p "$AGENTS_DIR"
+mkdir -p "$COMMANDS_DIR"
 
 cp index.ts    "$PLUGIN_DIR/index.ts"
 cp reminder.md "$PLUGIN_DIR/reminder.md"
@@ -19,6 +21,9 @@ echo "[Rollabot] Plugin files copied to $PLUGIN_DIR"
 
 cp agents/*.md "$AGENTS_DIR/"
 echo "[Rollabot] Agent files copied to $AGENTS_DIR"
+
+cp commands/*.md "$COMMANDS_DIR/"
+echo "[Rollabot] Commands copied to $COMMANDS_DIR"
 
 PLUGIN_PATH="$PLUGIN_DIR/index.ts"
 
