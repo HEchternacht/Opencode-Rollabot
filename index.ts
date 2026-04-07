@@ -4,6 +4,8 @@ import path from "path"
 
 const agentBySession = new Map<string, string>()
 const lastTextBySession = new Map<string, string>() // fallback buffer: last LLM text per session
+const lastCodeFileBySession = new Map<string, string>() // last written code file per session
+const smokeFailedBySession = new Map<string, string>() // session → failing file path
 
 type ToastVariant = "info" | "success" | "warning" | "error"
 
@@ -111,6 +113,14 @@ export const server: Plugin = async ({ $, directory, client }) => {
         )
       }
 
+      const smokeFail = input.sessionID ? smokeFailedBySession.get(input.sessionID) : undefined
+      if (smokeFail) {
+        parts.push(
+          `⛔ SMOKE TEST FAILING in "${smokeFail}".\n` +
+          `Fix that file FIRST. Do NOT write any other file until smoke passes.`
+        )
+      }
+
       if (parts.length > 0) {
         output.system[0] = (output.system[0] ?? "") + "\n" + parts.join("\n")
       }
@@ -126,6 +136,13 @@ export const server: Plugin = async ({ $, directory, client }) => {
       const agent = agentBySession.get(input.sessionID)
       const base = path.basename(filePath).toLowerCase()
       const isDesignFile = base === "design.md"
+
+      // Block all writes while smoke is failing (except the failing file itself)
+      const smokeFail = smokeFailedBySession.get(input.sessionID)
+      if (smokeFail && path.resolve(filePath) !== path.resolve(smokeFail)) {
+        toast(`[Rollabot] ⛔ blocked — fix smoke in ${path.basename(smokeFail)} first`, "error")
+        throw new Error(`Smoke test is FAILING in "${smokeFail}". Fix that file before writing anything else.`)
+      }
       const ext = path.extname(filePath).toLowerCase()
       const CODE_EXTS = [".py", ".js", ".ts", ".jsx", ".tsx", ".rs", ".go", ".rb"]
       const isTodo = base.includes("todo") || base.includes("task") || base.includes("checklist")
@@ -148,7 +165,7 @@ export const server: Plugin = async ({ $, directory, client }) => {
       }
     },
 
-    // After writes: verify design.md for designer, smoke test for code files
+    // After writes: verify design.md for designer; record code files; smoke on todo update
     "tool.execute.after": async (input, output) => {
       if (!["write", "edit"].includes(input.tool.toLowerCase())) return
 
@@ -158,10 +175,11 @@ export const server: Plugin = async ({ $, directory, client }) => {
       const agent = agentBySession.get(input.sessionID)
       const absPath = path.isAbsolute(filePath) ? filePath : path.join(directory, filePath)
       const ext = path.extname(filePath).toLowerCase()
-      const dir = path.dirname(absPath)
       const base = path.basename(filePath)
       const isDesignFile = base.toLowerCase() === "design.md"
       const isTodo = base.toLowerCase().includes("todo") || base.toLowerCase().includes("task")
+      const CODE_EXTS = [".py", ".js", ".ts", ".jsx", ".tsx", ".rs", ".go", ".rb"]
+      const isTypeOnly = base.endsWith(".d.ts")
 
       // Designer wrote something — check design.md
       if (agent === "designer") {
@@ -180,67 +198,78 @@ export const server: Plugin = async ({ $, directory, client }) => {
         return
       }
 
-      // Todo file created or updated
+      // Code file written — record it for smoke on next todo update (skip .d.ts / type-only)
+      if (CODE_EXTS.includes(ext) && !isTypeOnly) {
+        lastCodeFileBySession.set(input.sessionID, absPath)
+        toast(`[Rollabot] ${base} written — smoke pending`, "info", 2000)
+        output.output += `\n📋 Update todos to trigger smoke test for "${base}".`
+        return
+      }
+
+      // Todo updated — run smoke on last recorded code file
       if (isTodo) {
-        const existed = existsSync(absPath)
-        toast(`[Rollabot] todo ${existed ? "updated" : "created"}: ${base}`, "info")
-        output.output += `\n📋 todo ${existed ? "updated" : "created"}.`
+        const lastFile = lastCodeFileBySession.get(input.sessionID)
+        if (!lastFile || !existsSync(lastFile)) {
+          toast(`[Rollabot] todo updated`, "info", 2000)
+          return
+        }
+
+        const lastBase = path.basename(lastFile)
+        const lastExt = path.extname(lastFile).toLowerCase()
+        const dir = path.dirname(lastFile)
+        toast(`[Rollabot] running smoke test: ${lastBase}`, "info", 2000)
+
+        let smokeOutput = ""
+        try {
+          let result: Awaited<ReturnType<typeof $>> | undefined
+
+          if (lastExt === ".py") {
+            result = await $`python ${lastFile}`.cwd(dir).quiet().nothrow()
+          } else if (lastExt === ".js") {
+            result = await $`node ${lastFile}`.cwd(dir).quiet().nothrow()
+          } else if (lastExt === ".ts") {
+            result = await $`npx tsx ${lastFile}`.cwd(dir).quiet().nothrow()
+          } else if (lastExt === ".jsx" || lastExt === ".tsx") {
+            const smokeFile = lastFile.replace(/\.(jsx|tsx)$/, `.smoke.${lastExt.slice(1)}`)
+            if (existsSync(smokeFile)) {
+              result = await $`npx tsx ${smokeFile}`.cwd(dir).quiet().nothrow()
+            } else {
+              toast(`[Rollabot] no smoke file for ${lastBase}`, "warning")
+              smokeOutput = `\n⚠ NO SMOKE FILE [${lastBase}]: create ${path.basename(smokeFile)} to enable smoke.`
+            }
+          } else if (lastExt === ".rs") {
+            result = await $`cargo test smoke`.cwd(directory).quiet().nothrow()
+          } else if (lastExt === ".go") {
+            result = await $`go test -run TestSmoke .`.cwd(dir).quiet().nothrow()
+          } else if (lastExt === ".rb") {
+            result = await $`ruby ${lastFile}`.cwd(dir).quiet().nothrow()
+          }
+
+          if (result !== undefined) {
+            const out = ((result.stdout?.toString("utf8") ?? "") + (result.stderr?.toString("utf8") ?? "")).trim()
+            if (result.exitCode === 0) {
+              toast(`[Rollabot] smoke passed: ${lastBase} ✓`, "success")
+              smokeFailedBySession.delete(input.sessionID)
+              smokeOutput = `\n✓ SMOKE PASSED [${lastBase}] — safe to continue.`
+            } else {
+              toast(`[Rollabot] ⛔ smoke FAILED: ${lastBase}`, "error", 8000)
+              smokeFailedBySession.set(input.sessionID, lastFile)
+              smokeOutput = `\n✗ SMOKE FAILED [${lastBase}] — fix this file NOW. No other files until smoke passes.\n${out.slice(0, 500)}`
+            }
+          }
+        } catch (e: any) {
+          toast(`[Rollabot] smoke error: ${lastBase}`, "error")
+          smokeFailedBySession.set(input.sessionID, lastFile)
+          smokeOutput = `\n⚠ SMOKE ERROR [${lastBase}]: ${e?.message ?? String(e)}`
+        }
+
+        const SMOKE_HINT = `Smoke: py→python "f.py" | js→node "f.js" | ts→npx tsx "f.ts" | tsx→npx tsx "f.smoke.tsx" | rs→cargo test smoke | go→go test -run TestSmoke`
+        output.output += smokeOutput + `\n${SMOKE_HINT}`
         return
       }
 
-      // Code file — run smoke test
-      const CODE_EXTS = [".py", ".js", ".ts", ".jsx", ".tsx", ".rs", ".go", ".rb"]
-      if (!CODE_EXTS.includes(ext)) {
-        toast(`[Rollabot] file written: ${base}`, "info", 2000)
-        output.output += `\n📋 Update todos — mark "${base}" done.`
-        return
-      }
-
-      toast(`[Rollabot] running smoke test: ${base}`, "info", 2000)
-
-      let smokeOutput = ""
-      try {
-        let result: Awaited<ReturnType<typeof $>> | undefined
-
-        if (ext === ".py") {
-          result = await $`python ${absPath}`.cwd(dir).quiet().nothrow()
-        } else if (ext === ".js") {
-          result = await $`node ${absPath}`.cwd(dir).quiet().nothrow()
-        } else if (ext === ".ts") {
-          result = await $`npx tsx ${absPath}`.cwd(dir).quiet().nothrow()
-        } else if (ext === ".jsx" || ext === ".tsx") {
-          const smokeFile = absPath.replace(/\.(jsx|tsx)$/, `.smoke.${ext.slice(1)}`)
-          if (existsSync(smokeFile)) {
-            result = await $`npx tsx ${smokeFile}`.cwd(dir).quiet().nothrow()
-          } else {
-            toast(`[Rollabot] no smoke file for ${base}`, "warning")
-            smokeOutput = `\n⚠ NO SMOKE FILE [${base}]: create ${path.basename(smokeFile)}.`
-          }
-        } else if (ext === ".rs") {
-          result = await $`cargo test smoke`.cwd(directory).quiet().nothrow()
-        } else if (ext === ".go") {
-          result = await $`go test -run TestSmoke .`.cwd(dir).quiet().nothrow()
-        } else if (ext === ".rb") {
-          result = await $`ruby ${absPath}`.cwd(dir).quiet().nothrow()
-        }
-
-        if (result !== undefined) {
-          const out = ((result.stdout?.toString("utf8") ?? "") + (result.stderr?.toString("utf8") ?? "")).trim()
-          if (result.exitCode === 0) {
-            toast(`[Rollabot] smoke passed: ${base}`, "success")
-            smokeOutput = `\n✓ SMOKE PASSED [${base}]`
-          } else {
-            toast(`[Rollabot] smoke FAILED: ${base}`, "error", 6000)
-            smokeOutput = `\n✗ SMOKE FAILED [${base}] — fix before next file:\n${out.slice(0, 500)}`
-          }
-        }
-      } catch (e: any) {
-        toast(`[Rollabot] smoke error: ${base}`, "error")
-        smokeOutput = `\n⚠ SMOKE ERROR [${base}]: ${e?.message ?? String(e)}`
-      }
-
-      const SMOKE_HINT = `Smoke: py→python "f.py" | js→node "f.js" | ts→npx tsx "f.ts" | tsx→npx tsx "f.smoke.tsx" | rs→cargo test smoke | go→go test -run TestSmoke`
-      output.output += smokeOutput + `\n📋 Update todos — mark "${base}" done.\n${SMOKE_HINT}`
+      // Other file written
+      toast(`[Rollabot] file written: ${base}`, "info", 2000)
     },
   }
 }
