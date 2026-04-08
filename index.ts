@@ -1,26 +1,28 @@
 import type { Plugin } from "@opencode-ai/plugin"
-import { readFileSync, existsSync } from "fs"
+import { readFileSync, writeFileSync, existsSync } from "fs"
 import path from "path"
 
 const agentBySession = new Map<string, string>()
 const lastTextBySession = new Map<string, string>()
 const lastCodeFileBySession = new Map<string, string>()
 const smokeFailedBySession = new Map<string, string>()
-const smokePendingBySession = new Set<string>() // code written, todo not updated yet
+const smokePendingBySession = new Set<string>()
 const designReadSentBySession = new Set<string>()
-const firstCallSentBySession = new Set<string>()
 const cavemodeBySession = new Set<string>()
-const pipelineDisabledBySession = new Set<string>()
+const pipelineEnabledBySession = new Set<string>()  // OFF by default — /design enables it
+const designerCallNeededBySession = new Set<string>()
+const designClarifyingBySession = new Set<string>()       // waiting for user to answer clarifying Qs
+const designQuestionsAskedBySession = new Set<string>()   // AI has asked Qs, next user msg triggers designer
+const designInitialPromptBySession = new Map<string, string>()
+const pendingInjBySession = new Map<string, string>()
 
 type ToastVariant = "info" | "success" | "warning" | "error"
 
 export const server: Plugin = async ({ directory, client }) => {
-  // import.meta.dirname may be undefined in some runtimes — fall back to __dirname or CWD
   const pluginDir = (import.meta as any).dirname ?? __dirname ?? process.cwd()
   const reminderPath = path.join(pluginDir, "reminder.md")
   const designPath = path.join(directory, "design.md")
 
-  // Load reminder once at startup — toast if missing so user knows immediately
   let reminderContent = ""
   try {
     reminderContent = readFileSync(reminderPath, "utf8").trim()
@@ -38,151 +40,185 @@ export const server: Plugin = async ({ directory, client }) => {
   const toast = (message: string, variant: ToastVariant = "info", duration = 4000) =>
     client.tui.showToast({ body: { message, variant, duration }, query: { directory } }).catch(() => {})
 
-  // Resolve agent: prefer live input.agent (fires before chat.params in some hooks)
   const resolveAgent = (input: any) =>
     agentBySession.get(input.sessionID) ?? (input as any).agent ?? undefined
 
   return {
-    // Track active agent + inject all rules/state into user message every call
-    "chat.params": async (input, output) => {
-      const prev = agentBySession.get(input.sessionID)
-      if (prev !== input.agent) {
-        agentBySession.set(input.sessionID, input.agent)
-        designReadSentBySession.delete(input.sessionID)
-        firstCallSentBySession.delete(input.sessionID)
+    // Detect toggle commands + track agent switches
+    "chat.message": async (input, output) => {
+      const sessionID = input.sessionID
+      const agent = input.agent ?? "default"
+
+      // Track agent switches
+      const prev = agentBySession.get(sessionID)
+      if (prev !== agent) {
+        agentBySession.set(sessionID, agent)
+        designReadSentBySession.delete(sessionID)
         const agentLabel: Record<string, string> = {
           designer: "Designer invoked",
           smoker: "Smoker invoked",
           coder: "Coder invoked",
           plan: "Plan agent invoked",
         }
-        toast(`[Rollabot] ${agentLabel[input.agent] ?? `Agent: ${input.agent}`}`, "info", 2500)
+        toast(`[Rollabot] ${agentLabel[agent] ?? `Agent: ${agent}`}`, "info", 2500)
       }
 
-      const agent = resolveAgent(input)
-      const parts: string[] = []
+      // Read text from message parts
+      const textPart = (output.parts ?? []).find((p: any) => p.type === "text") as any
+      let text: string = textPart?.text ?? ""
 
-      // Detect /cm command in current user message — toggle cavemode, strip command from message
-      const getMsgs = () => (output as any).messages ?? (input as any).messages ?? []
-      const getMsgText = (msg: any): string =>
-        typeof msg.content === "string" ? msg.content
-        : (msg.content?.find((p: any) => p.type === "text")?.text ?? "")
-      const setMsgText = (msg: any, text: string) => {
-        if (typeof msg.content === "string") msg.content = text
-        else {
-          const t = msg.content?.find((p: any) => p.type === "text")
-          if (t) t.text = text
-          else msg.content = [{ type: "text", text }]
+      if (text.includes("ROLLABOT_CM_TOGGLE")) {
+        if (cavemodeBySession.has(sessionID)) {
+          cavemodeBySession.delete(sessionID)
+          toast("[Rollabot] cavemode OFF", "info", 2000)
+        } else {
+          cavemodeBySession.add(sessionID)
+          toast("[Rollabot] cavemode ON", "success", 2000)
         }
+        text = text.replace(/ROLLABOT_CM_TOGGLE\s*/g, "").trim()
+        textPart.text = text
       }
-      const currentUser = [...getMsgs()].reverse().find((m: any) => m.role === "user")
-      if (currentUser) {
-        let text = getMsgText(currentUser)
-        if (text.includes("ROLLABOT_CM_TOGGLE")) {
-          if (cavemodeBySession.has(input.sessionID)) {
-            cavemodeBySession.delete(input.sessionID)
-            toast("[Rollabot] cavemode OFF", "info", 2000)
+
+      if (text.includes("ROLLABOT_DESIGN_TOGGLE")) {
+        if (pipelineEnabledBySession.has(sessionID)) {
+          pipelineEnabledBySession.delete(sessionID)
+          designerCallNeededBySession.delete(sessionID)
+          designClarifyingBySession.delete(sessionID)
+          designQuestionsAskedBySession.delete(sessionID)
+          designInitialPromptBySession.delete(sessionID)
+          toast("[Rollabot] design+smoke pipeline OFF", "warning", 3000)
+        } else {
+          const prompt = text.replace(/ROLLABOT_DESIGN_TOGGLE\s*/g, "").trim()
+          pipelineEnabledBySession.add(sessionID)
+          if (designMissing()) {
+            designClarifyingBySession.add(sessionID)
+            if (prompt) designInitialPromptBySession.set(sessionID, prompt)
+            toast("[Rollabot] /design — clarification phase started", "success", 3000)
           } else {
-            cavemodeBySession.add(input.sessionID)
-            toast("[Rollabot] cavemode ON", "success", 2000)
+            toast("[Rollabot] /design — design.md exists, skipping to implementation", "success", 3000)
           }
-          text = text.replace(/ROLLABOT_CM_TOGGLE\s*/g, "").trim()
-          setMsgText(currentUser, text)
         }
-        if (text.includes("ROLLABOT_DESIGN_TOGGLE")) {
-          if (pipelineDisabledBySession.has(input.sessionID)) {
-            pipelineDisabledBySession.delete(input.sessionID)
-            toast("[Rollabot] design+smoke pipeline ON", "success", 3000)
-          } else {
-            pipelineDisabledBySession.add(input.sessionID)
-            toast("[Rollabot] design+smoke pipeline OFF", "warning", 3000)
-          }
-          setMsgText(currentUser, text.replace(/ROLLABOT_DESIGN_TOGGLE\s*/g, "").trim())
-        }
+        text = text.replace(/ROLLABOT_DESIGN_TOGGLE\s*/g, "").trim()
+        textPart.text = text
       }
 
-      // Always inject reminder rules
-      if (reminderContent) parts.push(`RULES:\n${reminderContent}`)
+      if (text.includes("ROLLABOT_SMART")) {
+        const userCommand = text.replace(/ROLLABOT_SMART\s*/g, "").trim()
+        text = `Before doing this task, think step by step about how you would approach it — write out your plan visibly so I can follow along. Then execute it fully.\n\nTask: ${userCommand}`
+        textPart.text = text
+        toast("[Rollabot] /smart — thinking mode active", "info", 2500)
+      }
 
-      // Cavemode injection
-      if (cavemodeBySession.has(input.sessionID)) {
-        parts.push(
+      // Clarification phase: user has answered → move to designer
+      if (designClarifyingBySession.has(sessionID) && designQuestionsAskedBySession.has(sessionID)) {
+        designQuestionsAskedBySession.delete(sessionID)
+        designClarifyingBySession.delete(sessionID)
+        designerCallNeededBySession.add(sessionID)
+        toast("[Rollabot] requirements gathered — calling @designer", "success", 3000)
+      }
+
+      const injParts: string[] = []
+
+      if (reminderContent) injParts.push(`RULES:\n${reminderContent}`)
+
+      if (cavemodeBySession.has(sessionID)) {
+        injParts.push(
           `CAVEMODE ON: strip articles(the/a/an), filler(I will/let me/I'll/great/now I/happy to/I am going to/I need to), narration, preamble.\n` +
           `Every word must carry info — zero decoration. No restating what was asked.\n` +
-          `Apply same density inside <think> tags: keep step count, cut all fluff per step.\n` +
+          `Apply same density to your internal reasoning: keep step count, cut all fluff per step.\n` +
           `Bad: "I will now fix the bug on the second line of the file"\n` +
           `Good: "fix bug line 2"`
         )
       }
 
-      // First call of session — designer gate (pipeline-gated)
-      if (!firstCallSentBySession.has(input.sessionID)) {
-        firstCallSentBySession.add(input.sessionID)
-        if (!pipelineDisabledBySession.has(input.sessionID))
-          parts.push(`If this request involves writing or modifying code, call @designer FIRST.`)
-      }
+      const pipelineOn = pipelineEnabledBySession.has(sessionID)
 
-      const pipelineOn = !pipelineDisabledBySession.has(input.sessionID)
-      if (!pipelineOn) parts.push(`⚙ design+smoke pipeline DISABLED. No design.md or smoke enforcement.`)
-
-      // Designer-specific
-      if (pipelineOn && agent === "designer") {
-        const missing = designMissing()
-        if (missing) toast(`[Rollabot] designer active — design.md missing`, "warning")
-        parts.push(
-          `⚠ YOU MUST write or append to "design.md" using Write or Edit tool.\n` +
-          `design.md: ${missing ? "MISSING ✗ — CREATE it NOW" : "EXISTS ✓ — APPEND your plans NOW"}\n` +
-          `NEVER use bash/heredoc. Not done until design.md has content.`
+      if (!pipelineOn) {
+        injParts.push(`⚙ design+smoke pipeline INACTIVE. Use /design <prompt> to enable full pipeline. Smoke testing code is still MANDATORY regardless.`)
+      } else if (designClarifyingBySession.has(sessionID)) {
+        const initialPrompt = designInitialPromptBySession.get(sessionID) ?? "(no prompt given)"
+        injParts.push(
+          `🔍 CLARIFICATION PHASE — DO NOT call @designer yet.\n` +
+          `User's initial request: "${initialPrompt}"\n` +
+          `Your job now: use the "question" tool to ask ALL clarifying questions in a SINGLE tool call.\n` +
+          `Pass a "questions" array covering every unknown: goals & scope, must-have features, nice-to-haves, ` +
+          `tech stack preferences, UI/UX style, target users, performance/scale needs, integrations, constraints, anything ambiguous.\n` +
+          `Be thorough — missing a requirement now means rework later.\n` +
+          `After the user answers, @designer will be called automatically with the full brief.\n` +
+          `IMPORTANT: use the "question" tool — do NOT write questions as plain text.`
         )
-      } else if (pipelineOn && designMissing()) {
-        toast(`[Rollabot] ⛔ design.md missing — VIOLATION`, "error", 6000)
-        parts.push(
-          `⛔⛔⛔ VIOLATION: design.md MISSING.\n` +
-          `You CANNOT write code, files, or todos. You are failing your role.\n` +
-          `STOP. Call @designer NOW to write design.md first.`
+      } else {
+        injParts.push(
+          `PIPELINE: ask until clear → @designer (writes design.md) → implement steps from design.md (split frontend/backend).\n` +
+          `CODE: write file → update todo → smoke test runs automatically. No next file until smoke passes.\n` +
+          `DESIGN.MD: always follow design.md. If you have not read it yet this session, use the Read tool on design.md BEFORE any Write or Edit call.\n` +
+          `DESIGN.MD CHANGES: if any planned change conflicts with design.md OR is not covered by it (even small relevant ones), you MUST update design.md FIRST before applying the change. No exceptions.\n` +
+          `⚠ CRITICAL: ONLY the @designer subagent can create or write design.md. YOU MUST NEVER create or write design.md yourself. If design.md is missing, invoke the Task tool with agent="designer" and the full specs as the prompt — that is how you call @designer. Do NOT write design.md yourself.`
         )
-      } else if (pipelineOn && !designReadSentBySession.has(input.sessionID)) {
-        designReadSentBySession.add(input.sessionID)
-        parts.push(`📋 design.md exists. READ IT NOW before doing anything — a project may be in progress.`)
-      }
-
-      // Smoke state (pipeline-gated)
-      if (pipelineOn && smokePendingBySession.has(input.sessionID)) {
-        const pending = lastCodeFileBySession.get(input.sessionID)
-        const rel = pending ? path.relative(directory, pending) : "last file"
-        parts.push(`⚠ SMOKE PENDING: call @smoker with "${rel}" NOW. No new code files until SMOKE:PASS.`)
-      }
-      if (pipelineOn) {
-        const smokeFail = smokeFailedBySession.get(input.sessionID)
-        if (smokeFail) parts.push(`⛔ SMOKE FAILING: "${path.basename(smokeFail)}" — fix it before any other file.`)
-      }
-
-      // Strip old injections from ALL past user messages, inject only into current one
-      const STRIP = /\n\n---\n[\s\S]*?\n---/g
-      const stripMsg = (msg: any) => {
-        if (typeof msg.content === "string") {
-          msg.content = msg.content.replace(STRIP, "")
-        } else if (Array.isArray(msg.content)) {
-          const t = msg.content.find((p: any) => p.type === "text")
-          if (t) t.text = t.text.replace(STRIP, "")
+        if (designerCallNeededBySession.has(sessionID)) {
+          designerCallNeededBySession.delete(sessionID)
+          injParts.push(`🎨 Call @designer NOW: use the Task tool with agent="designer" and the full specs as the prompt. @designer will write design.md.`)
         }
+
+        if (agent === "designer") {
+          const missing = designMissing()
+          if (missing) toast(`[Rollabot] designer active — design.md missing`, "warning")
+          injParts.push(
+            `⚠ YOU MUST write or append to "design.md" using Write or Edit tool.\n` +
+            `design.md: ${missing ? "MISSING ✗ — CREATE it NOW" : "EXISTS ✓ — APPEND your plans NOW"}\n` +
+            `NEVER use bash/heredoc. Not done until design.md has content.`
+          )
+        } else if (designMissing()) {
+          toast(`[Rollabot] ⛔ design.md missing — VIOLATION`, "error", 6000)
+          injParts.push(
+            `⛔⛔⛔ VIOLATION: design.md MISSING.\n` +
+            `You CANNOT write code, files, or todos. You are failing your role.\n` +
+            `STOP. Use the Task tool with agent="designer" and full specs as prompt. Do NOT write design.md yourself.`
+          )
+        } else if (!designReadSentBySession.has(sessionID)) {
+          designReadSentBySession.add(sessionID)
+          injParts.push(`📋 design.md exists. READ IT NOW before doing anything — a project may be in progress.`)
+        }
+
+
+        const smokeFail = smokeFailedBySession.get(sessionID)
+        if (smokeFail) injParts.push(`⛔ SMOKE FAILING: "${path.basename(smokeFail)}" — fix it before any other file.`)
       }
 
-      const msgs: any[] = (output as any).messages ?? (input as any).messages ?? []
-      for (const msg of msgs) {
-        if (msg.role === "user") stripMsg(msg)
+      // Store injection for transform hook (applied to LLM payload only, not stored/displayed)
+      if (injParts.length > 0) {
+        pendingInjBySession.set(sessionID, injParts.join("\n\n"))
       }
+    },
 
-      if (parts.length > 0) {
-        const injection = `\n\n---\n${parts.join("\n\n")}\n---`
-        const lastUser = [...msgs].reverse().find((m: any) => m.role === "user")
-        if (lastUser) {
-          if (typeof lastUser.content === "string") {
-            lastUser.content += injection
-          } else if (Array.isArray(lastUser.content)) {
-            const t = lastUser.content.find((p: any) => p.type === "text")
-            if (t) t.text += injection
-            else lastUser.content.push({ type: "text", text: injection })
+    // Inject into last user msg + strip from older ones — LLM payload only, TUI never sees it
+    "experimental.chat.messages.transform": async (input, output) => {
+      const msgs: any[] = output.messages ?? (input as any).messages
+      if (!msgs || msgs.length === 0) return
+
+      let lastUserIdx = -1
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].info?.role === "user") { lastUserIdx = i; break }
+      }
+      if (lastUserIdx === -1) return
+
+      const sessionID: string = msgs[lastUserIdx].info?.sessionID
+      const injection = sessionID ? pendingInjBySession.get(sessionID) : undefined
+
+      const MARKER = "\n\n---\n"
+
+      for (let i = 0; i < msgs.length; i++) {
+        if (msgs[i].info?.role !== "user") continue
+        const textPart = (msgs[i].parts ?? []).find((p: any) => p.type === "text") as any
+        if (!textPart) continue
+
+        if (i === lastUserIdx) {
+          // Append injection to last user message for this API call only
+          if (injection) textPart.text = (textPart.text ?? "").trimEnd() + MARKER + injection
+        } else {
+          // Strip any previously injected content from older messages
+          if (typeof textPart.text === "string" && textPart.text.includes(MARKER)) {
+            textPart.text = textPart.text.slice(0, textPart.text.indexOf(MARKER))
           }
         }
       }
@@ -192,13 +228,17 @@ export const server: Plugin = async ({ directory, client }) => {
     "experimental.text.complete": async (input, output) => {
       const agent = resolveAgent(input)
 
+      // Mark that AI has responded during clarification phase — next user msg triggers designer
+      if (designClarifyingBySession.has(input.sessionID) && agent !== "designer") {
+        designQuestionsAskedBySession.add(input.sessionID)
+      }
+
       if (agent === "designer") {
         lastTextBySession.set(input.sessionID, output.text)
         return
       }
 
       if (agent === "smoker") {
-        // Parse SMOKE:PASS / SMOKE:FAIL from last matching line
         const resultLine = output.text.trim().split("\n").reverse().find(l => l.startsWith("SMOKE:"))
         if (!resultLine) return
         const [, rest] = resultLine.split(/:PASS|:FAIL/)
@@ -217,7 +257,7 @@ export const server: Plugin = async ({ directory, client }) => {
       }
     },
 
-    // Designer session idle: enforce design.md written — auto-save from output if missing
+    // Designer session idle: enforce design.md written
     "event": async ({ event }) => {
       if (event.type !== "session.idle") return
       const sessionID = (event as any).properties?.sessionID
@@ -254,10 +294,9 @@ export const server: Plugin = async ({ directory, client }) => {
 
     // Gate writes behind design.md + smoke state
     "tool.execute.before": async (input, output) => {
-      if (pipelineDisabledBySession.has(input.sessionID)) return
+      if (!pipelineEnabledBySession.has(input.sessionID)) return
       if (!["write", "edit"].includes(input.tool.toLowerCase())) return
 
-      // FIX: try input.args first (correct), fall back to output.args (mutable copy)
       const args = (input as any).args ?? output.args
       const filePath: string = args?.filePath || args?.file_path || args?.path
       if (!filePath) return
@@ -266,52 +305,51 @@ export const server: Plugin = async ({ directory, client }) => {
       const base = path.basename(filePath).toLowerCase()
       const isDesignFile = base === "design.md"
 
-      // Block all writes while smoke is failing (except the failing file itself)
       const smokeFail = smokeFailedBySession.get(input.sessionID)
       if (smokeFail && path.resolve(filePath) !== path.resolve(smokeFail)) {
         toast(`[Rollabot] ⛔ blocked — fix smoke in ${path.basename(smokeFail)} first`, "error")
         throw new Error(`Smoke FAILING in "${smokeFail}". Fix it before writing anything else.`)
       }
 
-      // Block next code file while smoke test is still pending (todo not updated yet)
-      const ext2 = path.extname(filePath).toLowerCase()
-      const CODE_EXTS2 = [".py", ".js", ".ts", ".jsx", ".tsx", ".rs", ".go", ".rb"]
-      const isDesignFile2 = path.basename(filePath).toLowerCase() === "design.md"
-      if (smokePendingBySession.has(input.sessionID) && CODE_EXTS2.includes(ext2) && !isDesignFile2) {
-        const pending = lastCodeFileBySession.get(input.sessionID)
-        toast(`[Rollabot] ⛔ update todos first — smoke pending for ${pending ? path.basename(pending) : "last file"}`, "error")
-        throw new Error(`Update todos first to run smoke test for "${pending ?? "last file"}". No new code files until smoke clears.`)
+
+      if (agent === "designer" && isDesignFile) {
+        // If design.md already exists, append instead of overwrite
+        if (!designMissing() && input.tool.toLowerCase() === "write") {
+          const existing = readFileSync(designPath, "utf8").trimEnd()
+          const newContent: string = output.args?.content ?? output.args?.text ?? (input as any).args?.content ?? ""
+          if (newContent) {
+            output.args = { ...(output.args ?? {}), content: `${existing}\n\n${newContent}` }
+            toast("[Rollabot] designer — appending to existing design.md", "info", 2500)
+          }
+        }
+        return
       }
-
-      const ext = path.extname(filePath).toLowerCase()
-      const CODE_EXTS = [".py", ".js", ".ts", ".jsx", ".tsx", ".rs", ".go", ".rb"]
-      const isTodo = base.includes("todo") || base.includes("task") || base.includes("checklist")
-
-      if (agent === "designer" && isDesignFile) return
 
       if (agent === "designer" && !isDesignFile) {
         toast(`[Rollabot] ⛔ designer blocked — can only write design.md`, "error")
         throw new Error(`Designer can ONLY write design.md. You tried to write "${base}". Write your plans to design.md instead.`)
       }
 
+      const ext = path.extname(filePath).toLowerCase()
+      const CODE_EXTS = [".py", ".js", ".ts", ".jsx", ".tsx", ".rs", ".go", ".rb", ".html", ".css", ".sql"]
+      const isTodo = base.includes("todo") || base.includes("task") || base.includes("checklist")
+
       if (isTodo && designMissing()) {
         toast(`[Rollabot] ⛔ todo blocked — design.md missing`, "error")
         throw new Error(`design.md missing. Call @designer first.`)
       }
 
-      // FIX: was agent === "build" — now applies to all non-designer agents
       if (agent !== "designer" && CODE_EXTS.includes(ext) && designMissing()) {
-        toast(`[Rollabot] ⛔ code write blocked — design.md missing`, "error")
+        toast(`[Rollabot] ⛔ write blocked — design.md missing`, "error")
         throw new Error(`design.md missing. Call @designer first before writing code.`)
       }
     },
 
-    // Verbose toast for every tool action
+    // Verbose toast for every tool action + pipeline enforcement
     "tool.execute.after": async (input, output) => {
       const tool = input.tool.toLowerCase()
       const args: any = input.args ?? {}
 
-      // Per-tool verbose toasts
       if (tool === "write") {
         const f = args.filePath ?? args.file_path ?? args.path ?? "?"
         toast(`[Rollabot] File written: ${path.basename(f)}`, "success", 2500)
@@ -339,8 +377,7 @@ export const server: Plugin = async ({ directory, client }) => {
         toast(`[Rollabot] Subtask: ${desc}`, "info", 2000)
       }
 
-      // Pipeline enforcement — write/edit only
-      if (pipelineDisabledBySession.has(input.sessionID)) return
+      if (!pipelineEnabledBySession.has(input.sessionID)) return
       if (!["write", "edit"].includes(tool)) return
 
       const filePath: string = args.filePath ?? args.file_path ?? args.path
@@ -357,7 +394,6 @@ export const server: Plugin = async ({ directory, client }) => {
 
       output.output ??= ""
 
-      // Designer wrote — check design.md
       if (agent === "designer") {
         if (isDesignFile) {
           if (designMissing()) {
@@ -374,7 +410,6 @@ export const server: Plugin = async ({ directory, client }) => {
         return
       }
 
-      // Code file — record for smoke on next todo update (skip .d.ts)
       if (CODE_EXTS.includes(ext) && !isTypeOnly) {
         lastCodeFileBySession.set(input.sessionID, absPath)
         smokePendingBySession.add(input.sessionID)
@@ -383,7 +418,6 @@ export const server: Plugin = async ({ directory, client }) => {
         return
       }
 
-      // Todo updated — trigger smoker
       if (isTodo) {
         const lastFile = lastCodeFileBySession.get(input.sessionID)
         if (!lastFile) {

@@ -1,0 +1,51 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": [
+    "C:/Users/henri/.config/opencode/rollabot-instructions.md"
+  ],
+
+
+  "lsp": {
+    "biome": {
+      "command": ["biome", "lsp-proxy", "--stdio"],
+      "extensions": [".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"]
+    }
+  },
+
+  "plugin": [
+    "opencode-plugin-llama.cpp@latest",
+    "openslimedit@latest",
+    "C:/Users/henri/.config/opencode/plugins/rollabot/index.ts"
+  ],
+  "provider": {
+    "llama.cpp": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "llama.cpp (local)",
+      "options": {
+        "baseURL": "http://127.0.0.1:8080/v1"
+      }
+     
+    }
+  },
+  "agent": {
+   
+    "title": {
+      "disable": true
+    }
+  },
+  "mcp": {
+    "playwright": {
+      "type": "local",
+      "command": [
+        "npx",
+        "@playwright/mcp@latest"
+      ],
+      "enabled": false
+    },
+    "exa": {
+      "type": "remote",
+      "url": "https://mcp.exa.ai/mcp?exaApiKey=4dd82e4d-474a-4b29-9c30-608d982d3e6b",
+      "enabled": true
+    }
+  }
+}

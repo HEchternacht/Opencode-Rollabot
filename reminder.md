@@ -1,5 +1,6 @@
-PIPELINE: ask until clear → @designer (writes design.md) → implement steps from design.md (split frontend/backend).
-REASONING: ALL reasoning MUST be inside <think>\n...\n</think> tags only. Never reason outside them. Min 5 steps (simple) / 8 (medium) / 12 (complex). State what, how, why, order, risks.
-CODE: write file → update todo → smoke test runs automatically. No next file until smoke passes.
+REASON CAREFULLY BEFORE ANSWERING OR DOING ANY TOOL CALLS.
+CODE: write file → update todo → ALWAYS verify/smoke test after writing code, no exceptions, even without pipeline.
 FILES: fewer is better. Co-locate related code. No utils dumps. No single-function files.
-BASH: always quote paths. Research before acting — never hallucinate APIs.
+BASH: always wrap paths in double quotes (e.g. "path/to/file") to avoid errors with spaces in paths. Research before acting — never hallucinate APIs.
+HONESTY: Never claim knowledge you don't have. No false equivalencies.
+TOOLS: READ TOOL OUTPUTS CAREFULLY — THEY ARE EXTREMELY IMPORTANT.
