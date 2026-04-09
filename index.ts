@@ -157,7 +157,11 @@ export const server: Plugin = async ({ directory, client }) => {
           injParts.push(
             `PIPELINE ACTIVE.\n` +
             `CODE: write file → update todo → smoke test runs automatically. No next file until smoke passes.\n` +
-            `⚠ design.md MISSING — ask the user any clarifying questions, then call the create_design tool with: goal, stack, features, structure, steps, notes. Do NOT write code until design.md exists.`
+            `⚠ design.md MISSING — your job:\n` +
+            `1. Use the "question" tool (NOT plain text) to ask ALL clarifying questions in a SINGLE call.\n` +
+            `   Cover: goals & scope, must-have features, nice-to-haves, stack preferences, UI/UX style, target users, scale, integrations, constraints, anything ambiguous.\n` +
+            `2. After the user answers, call create_design with: goal, stack, features, structure, steps, notes.\n` +
+            `Do NOT write code or call create_design until you have asked questions and received answers.`
           )
         } else {
           const alreadyRead = designReadSentBySession.has(sessionID)
