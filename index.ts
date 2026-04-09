@@ -74,8 +74,17 @@ export const server: Plugin = async ({ directory, client }) => {
           writeFileSync(tp, todoContent)
           pipelineEnabledBySession.add(context.sessionID)
 
+          const todosJson = JSON.stringify(
+            args.steps.map((s, i) => ({ id: String(i + 1), content: s, status: "pending", priority: "medium" })),
+            null, 2
+          )
+
           toast("[Rollabot] design.md + todo.md created ✓", "success", 3000)
-          return `✓ design.md and todo.md written.\n\n--- design.md ---\n${designContent}\n--- todo.md ---\n${todoContent}`
+          return (
+            `✓ design.md and todo.md written.\n\n` +
+            `NEXT ACTION (mandatory): call todowrite immediately with this list so it appears visually:\n` +
+            `${todosJson}`
+          )
         },
       }),
     },
