@@ -165,8 +165,9 @@ export const server: Plugin = async ({ directory, client }) => {
           injParts.push(
             `PIPELINE ACTIVE.\n` +
             `CODE: write file → update todo → smoke test runs automatically. No next file until smoke passes.\n` +
-            `DESIGN.MD: ${alreadyRead ? "follow it" : "READ IT NOW before doing anything — read design.md first"}.\n` +
-            `DESIGN.MD CHANGES: if any planned change conflicts with design.md OR is not covered, edit design.md FIRST. No exceptions.`
+            `DESIGN.MD: ${alreadyRead ? "follow it" : "READ design.md AND todo.md NOW before doing anything — they tell you what to build and where you left off"}.\n` +
+            `DESIGN.MD CHANGES: if any planned change conflicts with design.md OR is not covered, edit design.md FIRST. No exceptions.\n` +
+            `TODO SYNC: always use the todowrite tool to update task status — it auto-syncs to todo.md so progress is preserved across sessions.`
           )
         }
 
@@ -284,6 +285,20 @@ export const server: Plugin = async ({ directory, client }) => {
       } else if (tool_name === "task") {
         const desc = String(args.description ?? args.prompt ?? "").slice(0, 60)
         toast(`[Rollabot] Subtask: ${desc}`, "info", 2000)
+      } else if (tool_name === "todowrite" && pipelineEnabledBySession.has(input.sessionID)) {
+        let todos = args.todos
+        if (typeof todos === "string") {
+          try { todos = JSON.parse(todos) } catch { todos = null }
+        }
+        if (Array.isArray(todos) && todos.length > 0) {
+          const icon = (s: string) => s === "completed" ? "x" : s === "in_progress" ? "~" : " "
+          const lines = todos.map((t: any) =>
+            `- [${icon(t.status ?? "")}] ${t.content ?? t.id ?? "?"}${t.priority && t.priority !== "medium" ? ` *(${t.priority})*` : ""}`
+          )
+          const tp = path.join(directory, "todo.md")
+          writeFileSync(tp, `# TODO\n\n${lines.join("\n")}\n`)
+          toast("[Rollabot] todo.md synced", "info", 1500)
+        }
       }
 
       if (!pipelineEnabledBySession.has(input.sessionID)) return
