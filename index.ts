@@ -137,7 +137,11 @@ export const server: Plugin = async ({ directory, client }) => {
       if (text.includes("ROLLABOT_SMART")) {
         const userPrompt = text.replace(/ROLLABOT_SMART\s*/g, "").trim()
         if (userPrompt) {
-          toast("[Rollabot] /smart — enhancing prompt...", "info", 2500)
+          const spinFrames = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]
+          let spinIdx = 0
+          const spinInterval = setInterval(() => {
+            toast(`[Rollabot] /smart ${spinFrames[spinIdx++ % spinFrames.length]} enhancing...`, "info", 300)
+          }, 220)
           try {
             const res = await fetch("http://127.0.0.1:8080/v1/chat/completions", {
               method: "POST",
@@ -163,6 +167,8 @@ export const server: Plugin = async ({ directory, client }) => {
           } catch (e: any) {
             textPart.text = userPrompt
             toast(`[Rollabot] /smart — fetch error: ${e?.message ?? e}`, "error", 4000)
+          } finally {
+            clearInterval(spinInterval)
           }
         }
       }
