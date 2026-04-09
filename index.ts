@@ -135,10 +135,36 @@ export const server: Plugin = async ({ directory, client }) => {
       }
 
       if (text.includes("ROLLABOT_SMART")) {
-        const userCommand = text.replace(/ROLLABOT_SMART\s*/g, "").trim()
-        text = `Before doing this task, think step by step about how you would approach it — write out your plan visibly so I can follow along. Then execute it fully.\n\nTask: ${userCommand}`
-        textPart.text = text
-        toast("[Rollabot] /smart — thinking mode active", "info", 2500)
+        const userPrompt = text.replace(/ROLLABOT_SMART\s*/g, "").trim()
+        if (userPrompt) {
+          toast("[Rollabot] /smart — enhancing prompt...", "info", 2500)
+          try {
+            const res = await fetch("http://127.0.0.1:8080/v1/chat/completions", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "Authorization": "Bearer test" },
+              body: JSON.stringify({
+                model: "local",
+                messages: [{
+                  role: "user",
+                  content: `Write the steps by steps to guide a weaker LLM on how to do the following task or prompt successfully:\n\n${userPrompt}`
+                }],
+                temperature: 0.7,
+              }),
+            })
+            const data = await res.json() as any
+            const enhanced = data?.choices?.[0]?.message?.content?.trim()
+            if (enhanced) {
+              textPart.text = enhanced
+              toast("[Rollabot] /smart — prompt enhanced ✓", "success", 2500)
+            } else {
+              textPart.text = userPrompt
+              toast("[Rollabot] /smart — no output, using original", "warning", 2500)
+            }
+          } catch (e: any) {
+            textPart.text = userPrompt
+            toast(`[Rollabot] /smart — fetch error: ${e?.message ?? e}`, "error", 4000)
+          }
+        }
       }
 
       const injParts: string[] = []
