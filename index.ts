@@ -190,7 +190,14 @@ export const server: Plugin = async ({ directory, client }) => {
       const pipelineOn = pipelineEnabledBySession.has(sessionID)
 
       if (!pipelineOn) {
-        injParts.push(`⚙ design+smoke pipeline INACTIVE. Use /design to enable. Smoke testing code is MANDATORY regardless.`)
+        injParts.push(
+          `⚙ design+smoke pipeline INACTIVE. Use /design to enable.\n` +
+          `YOU ARE A CODE ASSISTANT — NOT AN AUTOCODER. Never start writing code without asking:\n` +
+          `  • Does the user have existing code or data you should read first?\n` +
+          `  • How do they want to implement it? Present options and tradeoffs.\n` +
+          `  • How do they want to test it?\n` +
+          `Ask these before touching any file. Smoke testing is MANDATORY regardless of pipeline state.`
+        )
       } else {
         const missing = designMissing(directory)
 
@@ -200,7 +207,9 @@ export const server: Plugin = async ({ directory, client }) => {
             `CODE: write file → update todo → smoke test runs automatically. No next file until smoke passes.\n` +
             `⚠ design.md MISSING — your job:\n` +
             `1. Use the "question" tool (NOT plain text) to ask ALL clarifying questions in a SINGLE call.\n` +
-            `   Cover: goals & scope, must-have features, nice-to-haves, stack preferences, UI/UX style, target users, scale, integrations, constraints, anything ambiguous.\n` +
+            `   Cover: goals & scope, existing code/data (ask to read it), must-have features, nice-to-haves,\n` +
+            `   preferred implementation approach & tradeoffs, test strategy, stack preferences, UI/UX style,\n` +
+            `   target users, scale, integrations, constraints, anything ambiguous.\n` +
             `2. After the user answers, call create_design with: goal, stack, features, structure, steps, notes.\n` +
             `Do NOT write code or call create_design until you have asked questions and received answers.`
           )
@@ -212,6 +221,7 @@ export const server: Plugin = async ({ directory, client }) => {
             `CODE: write file → update todo → smoke test runs automatically. No next file until smoke passes.\n` +
             `DESIGN.MD: ${alreadyRead ? "follow it" : "READ design.md AND todo.md NOW before doing anything — they tell you what to build and where you left off"}.\n` +
             `DESIGN.MD CHANGES: if any planned change conflicts with design.md OR is not covered, edit design.md FIRST. No exceptions.\n` +
+            `BEFORE EACH STEP: if the implementation approach is ambiguous, ask the user before writing code. Never assume.\n` +
             `TODO SYNC: always use the todowrite tool to update task status — it auto-syncs to todo.md so progress is preserved across sessions.`
           )
         }
