@@ -40,6 +40,11 @@ export const server: Plugin = async ({ directory, client }) => {
     agentBySession.get(input.sessionID) ?? (input as any).agent ?? undefined
 
   return {
+    "chat.params": async (input, output) => {
+      const writing = smokePendingBySession.has(input.sessionID) || smokeFailedBySession.has(input.sessionID)
+      output.temperature = writing ? 0.0 : 0.6
+    },
+
     tool: {
       create_design: tool({
         description: "Create the project design document (design.md) and todo list (todo.md) from structured specs. This is the ONLY way to create design.md. Call ONCE after gathering all requirements from the user.",
